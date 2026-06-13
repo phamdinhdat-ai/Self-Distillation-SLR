@@ -1,27 +1,37 @@
+
 """
-Dataset utilities for PHOENIX14 / PHOENIX14-T style CSLR datasets.
+Dataset utilities for a PHOENIX14 / PHOENIX14-T subset extracted with the
+following flat layout:
 
-Expected directory layout (PHOENIX14):
-  <root>/
-    features/fullFrame-210x260px/
-      train/<signer>/<sample_id>/*.png
-      dev/   ...
-      test/  ...
-    annotations/manual/
-      train.corpus.csv
-      dev.corpus.csv
-      test.corpus.csv
+  <data_root>/
+      <annotation_dir>/                       e.g. "phoenix2014-T-pcet"
+          PHOENIX-2014-T.train.corpus.csv
+          PHOENIX-2014-T.dev.corpus.csv
+          PHOENIX-2014-T.test.corpus.csv
+      train/
+          <sample_name>/                      e.g. "01December_2011_Thursday_heute-3060"
+              images0001.png
+              images0002.png
+              ...
+      dev/
+          <sample_name>/...
+      test/
+          <sample_name>/...
 
-CSV columns (pipe-separated):
-  name|video|start|end|speaker|orth|translation
-
-'orth' contains the space-separated gloss sequence.
+Notes:
+  - Each sample folder lives DIRECTLY under train/dev/test (no extra
+    "features/fullFrame-210x260px/<split>/" nesting like the original
+    PHOENIX14 release).
+  - CSV files are pipe ('|') separated, with columns:
+        name|video|start|end|speaker|orth|translation
+    The 'orth' column holds the space-separated gloss sequence.
+  - Image filenames are auto-detected (images*.png / *.png / *.jpg).
 """
 
 import os
 import csv
 import glob
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import torch
 from torch.utils.data import Dataset
@@ -34,10 +44,10 @@ from PIL import Image
 # ---------------------------------------------------------------------------
 
 class Vocabulary:
-    """Maps gloss strings ↔ integer ids.  Index 0 is reserved for CTC blank."""
+    """Maps gloss strings <-> integer ids.  Index 0 is reserved for CTC blank."""
 
     BLANK = 0
-    UNK   = 1
+    UNK = 1
 
     def __init__(self):
         self._w2i: Dict[str, int] = {"<blank>": 0, "<unk>": 1}
@@ -47,7 +57,7 @@ class Vocabulary:
         if word not in self._w2i:
             idx = len(self._w2i)
             self._w2i[word] = idx
-            self._i2w[idx]  = word
+            self._i2w[idx] = word
         return self._w2i[word]
 
     def __len__(self):
@@ -73,9 +83,7 @@ class Vocabulary:
 # ---------------------------------------------------------------------------
 
 def build_transforms(split: str, img_size: int = 224):
-    base = [
-        transforms.Resize(256),
-    ]
+    base = [transforms.Resize(256)]
     if split == "train":
         aug = [
             transforms.RandomCrop(img_size),
@@ -87,20 +95,58 @@ def build_transforms(split: str, img_size: int = 224):
     return transforms.Compose(base + aug + [
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                             std =[0.229, 0.224, 0.225]),
+                              std=[0.229, 0.224, 0.225]),
     ])
 
 
 # ---------------------------------------------------------------------------
-# Phoenix-style Dataset
+# CSV discovery
+# ---------------------------------------------------------------------------
+
+def _find_corpus_csv(data_root: str, split: str) -> str:
+    """
+    Locates the corpus CSV for the given split.
+
+    Search order:
+      1. <data_root>/<*>/PHOENIX-2014-T.<split>.corpus.csv
+      2. <data_root>/PHOENIX-2014-T.<split>.corpus.csv
+      3. <data_root>/<*>/*<split>*.corpus.csv  (fallback, looser match)
+    """
+    patterns = [
+        os.path.join(data_root, "*", f"PHOENIX-2014-T.{split}.corpus.csv"),
+        os.path.join(data_root, f"PHOENIX-2014-T.{split}.corpus.csv"),
+        os.path.join(data_root, "*", f"*.{split}.corpus.csv"),
+        os.path.join(data_root, f"*.{split}.corpus.csv"),
+        os.path.join(data_root, "**", f"*{split}*corpus*.csv"),
+    ]
+    for pattern in patterns:
+        matches = sorted(glob.glob(pattern, recursive=True))
+        if matches:
+            return matches[0]
+
+    raise FileNotFoundError(
+        f"Could not find a corpus CSV for split='{split}' under '{data_root}'. "
+        f"Expected something like '<data_root>/<annotation_dir>/"
+        f"PHOENIX-2014-T.{split}.corpus.csv'."
+    )
+
+
+# ---------------------------------------------------------------------------
+# PHOENIX-style Dataset (flat per-sample folders)
 # ---------------------------------------------------------------------------
 
 class PhoenixDataset(Dataset):
     """
-    Loads pre-extracted frames from a PHOENIX14-style dataset.
-    Falls back to synthetic random tensors when frames are not found
-    (useful for unit-testing without the actual corpus).
+    Loads pre-extracted frames from a flat PHOENIX14/14-T subset:
+
+        <data_root>/<split>/<sample_name>/<frame images>
+
+    where <sample_name> matches the 'name' (or 'video' folder stem) column
+    of the corpus CSV.
     """
+
+    # File extensions to look for when listing frames, in priority order.
+    FRAME_GLOBS = ("*.png", "*.jpg", "*.jpeg")
 
     def __init__(
         self,
@@ -112,21 +158,18 @@ class PhoenixDataset(Dataset):
         synthetic: bool = False,
     ):
         assert split in ("train", "dev", "test")
-        self.root       = root
-        self.split      = split
-        self.img_size   = img_size
+        self.root = root
+        self.split = split
+        self.img_size = img_size
         self.max_frames = max_frames
-        self.synthetic  = synthetic
-        self.transform  = build_transforms(split, img_size)
+        self.synthetic = synthetic
+        self.transform = build_transforms(split, img_size)
 
-        # Load annotations
         if not synthetic:
             self.samples = self._load_annotations()
         else:
-            # Create tiny synthetic dataset for testing
             self.samples = self._make_synthetic_samples()
 
-        # Build / use vocabulary
         if vocab is None:
             self.vocab = Vocabulary.build(self.samples)
         else:
@@ -134,38 +177,63 @@ class PhoenixDataset(Dataset):
 
     # ------------------------------------------------------------------
     def _load_annotations(self) -> List[dict]:
-        csv_path = os.path.join(
-            self.root, "annotations", "manual", f"{self.split}.corpus.csv"
-        )
+        csv_path = _find_corpus_csv(self.root, self.split)
+        split_dir = os.path.join(self.root, self.split)
+
         samples = []
-        with open(csv_path, newline="") as f:
+        skipped = []
+        with open(csv_path, newline="", encoding="utf-8") as f:
             reader = csv.DictReader(f, delimiter="|")
             for row in reader:
-                name    = row["name"]
-                glosses = row["orth"].strip().split()
-                frame_dir = os.path.join(
-                    self.root,
-                    "features", "fullFrame-210x260px",
-                    self.split, name,
-                )
+                # 'name' is the canonical sample id; fall back to the stem
+                # of 'video' (e.g. ".../01December_2011.../1/*.png" -> folder name)
+                name = row.get("name", "").strip()
+                if not name:
+                    video = row.get("video", "")
+                    name = video.split("/")[0] if video else ""
+                if not name:
+                    continue
+
+                orth = row.get("orth", "")
+                glosses = orth.strip().split() if orth else []
+
+                sample_dir = os.path.join(split_dir, name)
+                if not os.path.isdir(sample_dir):
+                    skipped.append(name)
+                    continue
+
                 samples.append({
-                    "id":       name,
-                    "frame_dir": frame_dir,
-                    "glosses":  glosses,
+                    "id": name,
+                    "frame_dir": sample_dir,
+                    "glosses": glosses,
                 })
+
+        if not samples:
+            raise RuntimeError(
+                f"No samples found for split='{self.split}'. "
+                f"Checked CSV '{csv_path}' against folder '{split_dir}'. "
+                f"{len(skipped)} CSV rows had no matching folder."
+            )
+        if skipped:
+            print(
+                f"[PhoenixDataset] split='{self.split}': "
+                f"{len(skipped)} CSV entries had no matching folder under "
+                f"'{split_dir}' and were skipped (e.g. {skipped[:3]})."
+            )
+
         return samples
 
     def _make_synthetic_samples(self, n: int = 32) -> List[dict]:
         glosses_pool = [f"GLOSS_{i}" for i in range(20)]
         samples = []
         for i in range(n):
-            seq_len  = torch.randint(4, 9, (1,)).item()
-            glosses  = [glosses_pool[j % 20] for j in range(seq_len)]
+            seq_len = torch.randint(4, 9, (1,)).item()
+            glosses = [glosses_pool[j % 20] for j in range(seq_len)]
             samples.append({
-                "id":        f"synthetic_{i}",
+                "id": f"synthetic_{i}",
                 "frame_dir": None,
-                "glosses":   glosses,
-                "n_frames":  torch.randint(40, 100, (1,)).item(),
+                "glosses": glosses,
+                "n_frames": torch.randint(40, 100, (1,)).item(),
             })
         return samples
 
@@ -179,7 +247,6 @@ class PhoenixDataset(Dataset):
         if self.synthetic or sample["frame_dir"] is None:
             n_frames = int(sample.get("n_frames", 60))
             n_frames = min(n_frames, self.max_frames)
-            # Random RGB frames  (T, C, H, W)
             frames = torch.randn(n_frames, 3, self.img_size, self.img_size)
         else:
             frames = self._load_frames(sample["frame_dir"])
@@ -188,25 +255,32 @@ class PhoenixDataset(Dataset):
             self.vocab.encode(sample["glosses"]), dtype=torch.long
         )
         return {
-            "frames":      frames,          # (T, 3, H, W)
-            "labels":      label_ids,       # (N_gloss,)
-            "gloss_ids":   self.vocab.encode(sample["glosses"]),
-            "id":          sample["id"],
+            "frames": frames,        # (T, 3, H, W)
+            "labels": label_ids,     # (N_gloss,)
+            "gloss_ids": self.vocab.encode(sample["glosses"]),
+            "id": sample["id"],
         }
 
     def _load_frames(self, frame_dir: str) -> torch.Tensor:
-        paths = sorted(glob.glob(os.path.join(frame_dir, "*.png")))
+        paths: List[str] = []
+        for pattern in self.FRAME_GLOBS:
+            paths = sorted(glob.glob(os.path.join(frame_dir, pattern)))
+            if paths:
+                break
+
         if not paths:
-            paths = sorted(glob.glob(os.path.join(frame_dir, "*.jpg")))
-        # Sub-sample to max_frames
+            raise FileNotFoundError(
+                f"No image frames found in '{frame_dir}' "
+                f"(looked for {self.FRAME_GLOBS})."
+            )
+
+        # Sub-sample uniformly to max_frames
         if len(paths) > self.max_frames:
             step = len(paths) / self.max_frames
             paths = [paths[int(i * step)] for i in range(self.max_frames)]
-        frames = []
-        for p in paths:
-            img = Image.open(p).convert("RGB")
-            frames.append(self.transform(img))
-        return torch.stack(frames)   # (T, 3, H, W)
+
+        frames = [self.transform(Image.open(p).convert("RGB")) for p in paths]
+        return torch.stack(frames)  # (T, 3, H, W)
 
 
 # ---------------------------------------------------------------------------
@@ -217,31 +291,29 @@ def collate_fn(batch: List[dict]):
     """Pad frames to the same T within a batch."""
     frames_list = [b["frames"] for b in batch]
     labels_list = [b["labels"] for b in batch]
-    ids         = [b["id"] for b in batch]
-    gloss_seqs  = [b["gloss_ids"] for b in batch]
+    ids = [b["id"] for b in batch]
+    gloss_seqs = [b["gloss_ids"] for b in batch]
 
-    # Input lengths (T' after visual module ≈ T // 2, but we pass T for loss)
     T_max = max(f.size(0) for f in frames_list)
-    B     = len(batch)
+    B = len(batch)
     C, H, W = frames_list[0].shape[1:]
 
-    padded_frames  = torch.zeros(B, T_max, C, H, W)
-    input_lengths  = torch.zeros(B, dtype=torch.long)
+    padded_frames = torch.zeros(B, T_max, C, H, W)
+    input_lengths = torch.zeros(B, dtype=torch.long)
 
     for i, f in enumerate(frames_list):
         T = f.size(0)
         padded_frames[i, :T] = f
-        input_lengths[i]     = T
+        input_lengths[i] = T
 
-    # Flatten labels
-    flat_labels    = torch.cat(labels_list)
+    flat_labels = torch.cat(labels_list) if labels_list else torch.empty(0, dtype=torch.long)
     target_lengths = torch.tensor([len(l) for l in labels_list], dtype=torch.long)
 
     return {
-        "frames":         padded_frames,    # (B, T_max, C, H, W)
-        "labels":         flat_labels,      # (sum_N,)
-        "input_lengths":  input_lengths,    # (B,)
-        "target_lengths": target_lengths,   # (B,)
-        "ids":            ids,
-        "gloss_seqs":     gloss_seqs,       # list of B lists
+        "frames": padded_frames,         # (B, T_max, C, H, W)
+        "labels": flat_labels,           # (sum_N,)
+        "input_lengths": input_lengths,  # (B,)
+        "target_lengths": target_lengths,  # (B,)
+        "ids": ids,
+        "gloss_seqs": gloss_seqs,         # list of B lists
     }
