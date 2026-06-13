@@ -1,0 +1,18 @@
+# =============================================================================
+# VAC + Entropy combined
+# =============================================================================
+data:
+  synthetic: true
+  batch_size: 2
+loss:
+  feature_alignment:
+    enabled: true
+    weight: 0.1
+    mode: "cosine"
+  entropy_regularization:
+    enabled: true
+    weight: 0.01
+schedule:
+  epochs: 100
+output:
+  experiment_name: "loss_vac_entropy"

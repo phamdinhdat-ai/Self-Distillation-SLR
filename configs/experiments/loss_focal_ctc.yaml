@@ -1,0 +1,15 @@
+# =============================================================================
+# Focal CTC
+# Modulates CTC loss by (1 - p_target)^gamma to focus on hard examples
+# =============================================================================
+data:
+  synthetic: true
+  batch_size: 2
+loss:
+  focal_ctc:
+    enabled: true
+    gamma: 2.0
+schedule:
+  epochs: 100
+output:
+  experiment_name: "loss_focal_ctc"

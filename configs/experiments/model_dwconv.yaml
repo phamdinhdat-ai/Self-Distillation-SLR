@@ -1,0 +1,13 @@
+# =============================================================================
+# Depthwise-separable temporal convolutions
+# ~8-9x fewer params in temporal_cnn block
+# =============================================================================
+data:
+  synthetic: true
+  batch_size: 2
+model:
+  temporal_conv_type: "depthwise_separable"
+schedule:
+  epochs: 100
+output:
+  experiment_name: "model_dwconv"

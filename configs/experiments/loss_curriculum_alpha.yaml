@@ -1,0 +1,15 @@
+# =============================================================================
+# Curriculum on α
+# α starts low (visual weight low early), increases to 0.5 over stage 1
+# =============================================================================
+data:
+  synthetic: true
+  batch_size: 2
+loss:
+  alpha_schedule: "linear"
+  alpha_start: 0.1
+  alpha_end: 0.5
+schedule:
+  epochs: 100
+output:
+  experiment_name: "loss_curriculum_alpha"

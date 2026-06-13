@@ -1,0 +1,13 @@
+# =============================================================================
+# Confidence-weighted GSBA
+# Weights CE-LS per frame by cosine-similarity margin (winner - runner-up)
+# =============================================================================
+data:
+  synthetic: true
+  batch_size: 2
+loss:
+  gsba_confidence_weight: true
+schedule:
+  epochs: 100
+output:
+  experiment_name: "loss_confidence_gsba"

@@ -1,0 +1,101 @@
+# =============================================================================
+# SMKD Default Configuration — reproduces the paper baseline
+# =============================================================================
+
+# ---- Data ----
+data:
+  data_root: "./data/phoenix"
+  synthetic: true              # set false for real PHOENIX14-T
+  img_size: 224
+  max_frames: 300
+  num_workers: 0
+  batch_size: 2
+
+  # Temporal data augmentation (off by default = paper baseline)
+  temporal_aug:
+    enabled: false
+    temporal_mask_prob: 0.3    # probability of applying mask to a sample
+    temporal_mask_max_ratio: 0.15  # max fraction of frames to zero out
+    temporal_jitter_range: 0.0 # 0 = off; e.g. 0.2 = ±20% speed variation
+
+# ---- Model ----
+model:
+  d_model: 512
+  hidden_size: 512
+  backbone: "resnet18"         # one of: resnet18, mobilenet_v3_small, efficientnet_b0
+  temporal_conv_type: "standard"  # standard | depthwise_separable
+  multi_scale_temporal: false
+  multi_scale_dilation_rates: [1, 2]
+  use_tsm: false               # temporal shift module (ResNet-18 only)
+
+# ---- Loss ----
+loss:
+  alpha: 0.5                   # visual loss weight (stage 1/2)
+  label_smoothing: 0.2         # for GSBA CE-LS
+
+  # Alpha curriculum (off by default)
+  alpha_schedule: "fixed"      # fixed | linear | cosine
+  alpha_start: 0.1
+  alpha_end: 0.5
+
+  # VAC-style visual alignment constraint
+  feature_alignment:
+    enabled: false
+    weight: 0.1
+    mode: "cosine"             # cosine | l2
+
+  # Entropy regularization on blank posterior (anti-spike)
+  entropy_regularization:
+    enabled: false
+    weight: 0.01               # positive = maximize entropy (anti-spike)
+
+  # Focal CTC variant
+  focal_ctc:
+    enabled: false
+    gamma: 2.0
+
+  # Confidence-weighted GSBA
+  gsba_confidence_weight: false
+
+# ---- Training schedule ----
+schedule:
+  epochs: 100
+  stage1_end: 30
+  stage2_end: 90
+  eval_every: 5
+  gsba_update_every: 10
+
+  # Smooth stage transitions (off by default = hard cutoffs)
+  smooth_transitions: false
+  smooth_transition_epochs: 5
+
+  # Self-distillation across runs
+  self_distill:
+    enabled: false
+    teacher_ckpt: ""           # path to teacher checkpoint .pt file
+    kd_temperature: 4.0
+    kd_weight: 0.5
+
+# ---- Optimization ----
+optimization:
+  lr: 0.0001
+  lr_milestones: [40, 60, 80]
+  lr_gamma: 0.5
+
+  # AMP (automatic mixed precision)
+  use_amp: false
+  # Gradient accumulation
+  grad_accum_steps: 1
+
+  # EMA (exponential moving average)
+  use_ema: false
+  ema_decay: 0.999
+
+# ---- Hardware ----
+hardware:
+  multi_gpu: true
+
+# ---- Output ----
+output:
+  ckpt_dir: "./checkpoints"
+  experiment_name: "default"

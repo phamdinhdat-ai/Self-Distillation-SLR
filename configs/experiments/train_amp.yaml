@@ -1,0 +1,14 @@
+# =============================================================================
+# AMP (Automatic Mixed Precision) + Gradient Accumulation
+# Halves GPU memory, enables larger effective batch sizes
+# =============================================================================
+data:
+  synthetic: true
+  batch_size: 2
+optimization:
+  use_amp: true
+  grad_accum_steps: 2
+schedule:
+  epochs: 100
+output:
+  experiment_name: "train_amp"

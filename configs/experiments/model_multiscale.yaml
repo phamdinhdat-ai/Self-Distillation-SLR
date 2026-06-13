@@ -1,0 +1,14 @@
+# =============================================================================
+# Multi-scale temporal features
+# Adds parallel dilated temporal branch for both fine and broad receptive fields
+# =============================================================================
+data:
+  synthetic: true
+  batch_size: 2
+model:
+  multi_scale_temporal: true
+  multi_scale_dilation_rates: [1, 2]
+schedule:
+  epochs: 100
+output:
+  experiment_name: "model_multiscale"

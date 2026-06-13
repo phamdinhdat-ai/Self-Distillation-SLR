@@ -1,0 +1,13 @@
+# =============================================================================
+# MobileNetV3-Small backbone (lightweight spatial encoder)
+# 3-5x fewer FLOPs than ResNet-18
+# =============================================================================
+data:
+  synthetic: true
+  batch_size: 2
+model:
+  backbone: "mobilenet_v3_small"
+schedule:
+  epochs: 100
+output:
+  experiment_name: "model_mobilenet"

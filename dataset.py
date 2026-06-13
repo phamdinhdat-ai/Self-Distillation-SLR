@@ -156,6 +156,11 @@ class PhoenixDataset(Dataset):
         img_size: int = 224,
         max_frames: int = 300,
         synthetic: bool = False,
+        # Temporal augmentation params
+        temporal_aug_enabled: bool = False,
+        temporal_mask_prob: float = 0.3,
+        temporal_mask_max_ratio: float = 0.15,
+        temporal_jitter_range: float = 0.0,
     ):
         assert split in ("train", "dev", "test")
         self.root = root
@@ -164,6 +169,12 @@ class PhoenixDataset(Dataset):
         self.max_frames = max_frames
         self.synthetic = synthetic
         self.transform = build_transforms(split, img_size)
+
+        # Temporal augmentation (only applied during training)
+        self.temporal_aug_enabled = temporal_aug_enabled and split == "train"
+        self.temporal_mask_prob = temporal_mask_prob
+        self.temporal_mask_max_ratio = temporal_mask_max_ratio
+        self.temporal_jitter_range = temporal_jitter_range
 
         if not synthetic:
             self.samples = self._load_annotations()
@@ -251,6 +262,10 @@ class PhoenixDataset(Dataset):
         else:
             frames = self._load_frames(sample["frame_dir"])
 
+        # Apply temporal augmentations (training only)
+        if self.temporal_aug_enabled:
+            frames = self._apply_temporal_aug(frames)
+
         label_ids = torch.tensor(
             self.vocab.encode(sample["glosses"]), dtype=torch.long
         )
@@ -260,6 +275,34 @@ class PhoenixDataset(Dataset):
             "gloss_ids": self.vocab.encode(sample["glosses"]),
             "id": sample["id"],
         }
+
+    def _apply_temporal_aug(self, frames: torch.Tensor) -> torch.Tensor:
+        """
+        Apply temporal augmentations to a frame sequence.
+        - Temporal masking: zero out a random contiguous block of frames
+        - Temporal jitter: speed up/slow down via random frame rate change
+        """
+        T = frames.size(0)
+        if T < 2:
+            return frames
+
+        # 1. Temporal masking
+        if self.temporal_mask_prob > 0 and torch.rand(1).item() < self.temporal_mask_prob:
+            mask_len = max(1, int(T * self.temporal_mask_max_ratio * torch.rand(1).item()))
+            mask_start = torch.randint(0, max(1, T - mask_len), (1,)).item()
+            frames = frames.clone()
+            frames[mask_start:mask_start + mask_len] = 0.0
+
+        # 2. Temporal jitter (rate variation)
+        if self.temporal_jitter_range > 0:
+            jitter = 1.0 + self.temporal_jitter_range * (2 * torch.rand(1).item() - 1)
+            new_T = max(2, min(self.max_frames, int(T * jitter)))
+            if new_T != T:
+                # Simple nearest-neighbour temporal resampling
+                indices = torch.linspace(0, T - 1, new_T).long()
+                frames = frames[indices]
+
+        return frames
 
     def _load_frames(self, frame_dir: str) -> torch.Tensor:
         paths: List[str] = []

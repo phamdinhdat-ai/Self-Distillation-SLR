@@ -34,6 +34,10 @@ def parse_args():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
+    # ---- Config file (YAML) ----
+    p.add_argument("--config", default=None,
+                   help="Path to YAML config file. Overrides defaults; CLI args override YAML.")
+
     # ---- Data ----
     data_group = p.add_argument_group("data")
     data_group.add_argument(
@@ -110,7 +114,29 @@ def parse_args():
 
 def main():
     args = parse_args()
-    config = vars(args)
+
+    # Load YAML config if provided, then overlay CLI args
+    if args.config:
+        import yaml
+        config_path = args.config
+        if not os.path.exists(config_path):
+            alt = os.path.join("configs", config_path)
+            if os.path.exists(alt):
+                config_path = alt
+            elif os.path.exists(config_path + ".yaml"):
+                config_path = config_path + ".yaml"
+        with open(config_path, "r") as f:
+            yaml_cfg = yaml.safe_load(f)
+        from experiments.runner import flatten_config
+        config = flatten_config(yaml_cfg)
+        # CLI args override YAML values
+        cli_dict = vars(args)
+        for k, v in cli_dict.items():
+            if k == "config" or v is None:
+                continue
+            config[k] = v
+    else:
+        config = vars(args)
 
     if config["synthetic"]:
         print("Using SYNTHETIC data (no dataset needed)")

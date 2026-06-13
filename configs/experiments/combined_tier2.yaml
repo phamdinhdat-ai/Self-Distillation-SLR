@@ -1,0 +1,47 @@
+# =============================================================================
+# Combined Tier 2 Enhancements (everything except self-distillation)
+# Tier 1 + depthwise-separable convs + multi-scale + curriculum α + focal CTC
+# =============================================================================
+data:
+  synthetic: true
+  batch_size: 2
+  temporal_aug:
+    enabled: true
+    temporal_mask_prob: 0.3
+    temporal_mask_max_ratio: 0.15
+    temporal_jitter_range: 0.2
+
+model:
+  temporal_conv_type: "depthwise_separable"
+  multi_scale_temporal: true
+  multi_scale_dilation_rates: [1, 2]
+
+loss:
+  feature_alignment:
+    enabled: true
+    weight: 0.1
+    mode: "cosine"
+  entropy_regularization:
+    enabled: true
+    weight: 0.01
+  alpha_schedule: "linear"
+  alpha_start: 0.1
+  alpha_end: 0.5
+  focal_ctc:
+    enabled: true
+    gamma: 2.0
+  gsba_confidence_weight: true
+
+optimization:
+  use_amp: true
+  grad_accum_steps: 2
+  use_ema: true
+  ema_decay: 0.999
+
+schedule:
+  epochs: 100
+  smooth_transitions: true
+  smooth_transition_epochs: 5
+
+output:
+  experiment_name: "combined_tier2"

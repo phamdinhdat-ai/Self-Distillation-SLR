@@ -1,0 +1,15 @@
+# =============================================================================
+# Entropy Regularization (Anti-Spike)
+# Maximizes blank-class entropy to directly discourage over-confident blank spikes
+# =============================================================================
+data:
+  synthetic: true
+  batch_size: 2
+loss:
+  entropy_regularization:
+    enabled: true
+    weight: 0.01
+schedule:
+  epochs: 100
+output:
+  experiment_name: "loss_entropy"

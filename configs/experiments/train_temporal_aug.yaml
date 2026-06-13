@@ -1,0 +1,16 @@
+# =============================================================================
+# Temporal Data Augmentation
+# Random frame masking + temporal jitter for better generalization
+# =============================================================================
+data:
+  synthetic: true
+  batch_size: 2
+  temporal_aug:
+    enabled: true
+    temporal_mask_prob: 0.3
+    temporal_mask_max_ratio: 0.15
+    temporal_jitter_range: 0.2
+schedule:
+  epochs: 100
+output:
+  experiment_name: "train_temporal_aug"

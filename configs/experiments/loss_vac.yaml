@@ -1,0 +1,16 @@
+# =============================================================================
+# VAC-style Visual Alignment Constraint
+# Adds explicit ||g_c - v_c|| penalty between LVF and GCF at gloss-anchor frames
+# =============================================================================
+data:
+  synthetic: true
+  batch_size: 2
+loss:
+  feature_alignment:
+    enabled: true
+    weight: 0.1
+    mode: "cosine"
+schedule:
+  epochs: 100
+output:
+  experiment_name: "loss_vac"

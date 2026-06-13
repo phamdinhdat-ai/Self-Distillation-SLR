@@ -2,42 +2,170 @@
 Self-Mutual Knowledge Distillation (SMKD) for Continuous Sign Language Recognition
 Re-implementation based on: "Self-Mutual Distillation Learning for Continuous Sign Language Recognition"
 Hao et al., ICCV 2021
+
+Enhanced with: depthwise-separable temporal convs, multi-scale temporal branches,
+lightweight backbone support, and TSM (temporal shift module).
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision.models import resnet18
+from torchvision.models import resnet18, mobilenet_v3_small, efficientnet_b0
 
 
 # ---------------------------------------------------------------------------
-# Visual Module: 2D-ResNet18 + 1D-CNN
+# Backbone factory
+# ---------------------------------------------------------------------------
+
+BACKBONE_OUTPUT_DIMS = {
+    "resnet18": 512,
+    "mobilenet_v3_small": 576,
+    "efficientnet_b0": 1280,
+}
+
+
+def build_backbone(name: str) -> nn.Module:
+    """Returns a (feature_dim, spatial_encoder) pair."""
+    if name == "resnet18":
+        backbone = resnet18(weights=None)
+        return nn.Sequential(*list(backbone.children())[:-1]), 512
+    elif name == "mobilenet_v3_small":
+        backbone = mobilenet_v3_small(weights=None)
+        # Remove classifier; keep feature extractor
+        modules = list(backbone.children())[:-1]  # drop the classifier head
+        return nn.Sequential(*modules, nn.AdaptiveAvgPool2d((1, 1))), 576
+    elif name == "efficientnet_b0":
+        backbone = efficientnet_b0(weights=None)
+        modules = list(backbone.children())[:-1]  # drop classifier
+        return nn.Sequential(*modules, nn.AdaptiveAvgPool2d((1, 1))), 1280
+    else:
+        raise ValueError(f"Unknown backbone: {name}. "
+                         f"Choose from: {list(BACKBONE_OUTPUT_DIMS.keys())}")
+
+
+# ---------------------------------------------------------------------------
+# Depthwise-separable Conv1d block
+# ---------------------------------------------------------------------------
+
+class DepthwiseSeparableConv1d(nn.Module):
+    """Depthwise → Pointwise 1D conv, ~8-9x fewer params than standard Conv1d."""
+    def __init__(self, in_channels: int, out_channels: int, kernel_size: int, padding: int):
+        super().__init__()
+        self.depthwise = nn.Conv1d(in_channels, in_channels, kernel_size=kernel_size,
+                                   padding=padding, groups=in_channels)
+        self.pointwise = nn.Conv1d(in_channels, out_channels, kernel_size=1)
+
+    def forward(self, x):
+        return self.pointwise(self.depthwise(x))
+
+
+# ---------------------------------------------------------------------------
+# Temporal Shift Module (TSM) – zero-parameter temporal modeling
+# ---------------------------------------------------------------------------
+
+class TemporalShift(nn.Module):
+    """
+    Shifts part of the channels along the time dimension.
+    Fold this into a 2D CNN by processing (B*T, C, H, W) → shift → (B*T, C, H, W).
+    """
+
+    def __init__(self, n_segment: int = 8, shift_div: int = 8):
+        super().__init__()
+        self.n_segment = n_segment
+        self.fold_div = shift_div
+
+    def forward(self, x: torch.Tensor, T: int) -> torch.Tensor:
+        """
+        Args:
+            x: (B*T, C, H, W)
+            T: number of frames
+        Returns:
+            x_shifted: (B*T, C, H, W) with channels shifted along time
+        """
+        B_T, C, H, W = x.shape
+        B = B_T // T
+        x = x.view(B, T, C, H, W)                     # (B, T, C, H, W)
+        fold = C // self.fold_div
+        if fold == 0:
+            return x.view(B_T, C, H, W)
+
+        x_out = x.clone()
+        # Shift 1/8 channels forward, 1/8 channels backward
+        x_out[:, :-1, :fold, :, :] = x[:, 1:, :fold, :, :]           # forward shift
+        x_out[:, 1:, fold:2*fold, :, :] = x[:, :-1, fold:2*fold, :, :]  # backward shift
+        return x_out.view(B_T, C, H, W)
+
+
+# ---------------------------------------------------------------------------
+# Visual Module: 2D-backbone + 1D-CNN  (enhanced)
 # ---------------------------------------------------------------------------
 
 class VisualModule(nn.Module):
     """
     Encodes spatial and short-term temporal information.
-    Architecture: 2D-ResNet18 (frame-wise) + 1D-CNN (temporal).
+
+    Architecture: 2D backbone (frame-wise) + 1D-CNN (temporal).
+    Supports: backbone selection, depthwise-separable convs, multi-scale temporal
+    branches, and TSM.
     """
 
-    def __init__(self, d_model: int = 512):
+    def __init__(
+        self,
+        d_model: int = 512,
+        backbone_name: str = "resnet18",
+        temporal_conv_type: str = "standard",  # "standard" | "depthwise_separable"
+        multi_scale: bool = False,
+        multi_scale_dilations: list = None,
+        use_tsm: bool = False,
+    ):
         super().__init__()
 
-        # 2D spatial backbone (shared across all frames)
-        backbone = resnet18(weights=None)   # pass weights=ResNet18_Weights.DEFAULT for pretrained
-        # Remove the final FC layer; keep average pool → 512-dim feature
-        self.spatial_encoder = nn.Sequential(*list(backbone.children())[:-1])  # (B, 512, 1, 1)
+        # 2D spatial backbone
+        self.spatial_encoder, bb_dim = build_backbone(backbone_name)
+        self.backbone_dim = bb_dim
+        self.use_tsm = use_tsm and backbone_name == "resnet18"
+        self.tsm = TemporalShift() if self.use_tsm else None
 
-        # 1D temporal CNN: C5-P2-C5  (kernel=5, pool-stride=2, kernel=5)
+        # Adapter to map backbone output to d_model if needed
+        if bb_dim != d_model and not multi_scale:
+            self.backbone_adapter = nn.Linear(bb_dim, d_model)
+        else:
+            self.backbone_adapter = nn.Identity()
+
+        # 1D temporal CNN
+        self.temporal_conv_type = temporal_conv_type
+        ConvLayer = DepthwiseSeparableConv1d if temporal_conv_type == "depthwise_separable" else nn.Conv1d
+
+        in_ch = bb_dim
         self.temporal_cnn = nn.Sequential(
-            nn.Conv1d(512, d_model, kernel_size=5, padding=2),
+            ConvLayer(in_ch, d_model, kernel_size=5, padding=2),
             nn.BatchNorm1d(d_model),
             nn.ReLU(inplace=True),
-            nn.MaxPool1d(kernel_size=2, stride=2),           # downsample ×2
-            nn.Conv1d(d_model, d_model, kernel_size=5, padding=2),
+            nn.MaxPool1d(kernel_size=2, stride=2),
+            ConvLayer(d_model, d_model, kernel_size=5, padding=2),
             nn.BatchNorm1d(d_model),
             nn.ReLU(inplace=True),
         )
+
+        # Multi-scale temporal branch (optional)
+        self.multi_scale = multi_scale
+        if multi_scale:
+            dilations = multi_scale_dilations or [2]
+            self.ms_branches = nn.ModuleList()
+            for dil in dilations:
+                self.ms_branches.append(nn.Sequential(
+                    ConvLayer(bb_dim, d_model, kernel_size=5, padding=2 * dil, dilation=dil),
+                    nn.BatchNorm1d(d_model),
+                    nn.ReLU(inplace=True),
+                    nn.MaxPool1d(kernel_size=2, stride=2),
+                ))
+            # Fusion: concat (main + branches) → project back to d_model
+            n_branches = 1 + len(self.ms_branches)
+            self.ms_fusion = nn.Sequential(
+                nn.Conv1d(d_model * n_branches, d_model, kernel_size=1),
+                nn.BatchNorm1d(d_model),
+                nn.ReLU(inplace=True),
+            )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -47,15 +175,33 @@ class VisualModule(nn.Module):
             lvf: (B, T', d_model)  – Local Visual Features
         """
         B, T, C, H, W = x.shape
-        # Frame-wise 2D encoding
         x_flat = x.view(B * T, C, H, W)
-        feat = self.spatial_encoder(x_flat)          # (B*T, 512, 1, 1)
-        feat = feat.view(B, T, -1)                   # (B, T, 512)
+
+        # TSM shift (if enabled)
+        if self.use_tsm and self.tsm is not None:
+            x_flat = self.tsm(x_flat, T)
+
+        # Frame-wise 2D encoding
+        feat = self.spatial_encoder(x_flat)          # (B*T, bb_dim, 1, 1)
+        feat = feat.view(B, T, self.backbone_dim)    # (B, T, bb_dim)
 
         # Temporal 1D-CNN expects (B, C, T)
-        feat = feat.permute(0, 2, 1)                 # (B, 512, T)
-        lvf = self.temporal_cnn(feat)                # (B, d_model, T')
-        lvf = lvf.permute(0, 2, 1)                   # (B, T', d_model)
+        feat_t = feat.permute(0, 2, 1)               # (B, bb_dim, T)
+
+        if self.multi_scale:
+            # Main branch
+            main_feat = self.temporal_cnn(feat_t)     # (B, d_model, T')
+            # Multi-scale branches
+            ms_feats = [branch(feat_t) for branch in self.ms_branches]  # each (B, d_model, T')
+            # Concat and fuse
+            all_feats = torch.cat([main_feat] + ms_feats, dim=1)  # (B, d_model*n_branches, T')
+            lvf_t = self.ms_fusion(all_feats)                      # (B, d_model, T')
+        else:
+            if self.backbone_dim != self.temporal_conv_type and not isinstance(self.backbone_adapter, nn.Identity):
+                feat_t = self.backbone_adapter(feat_t.permute(0, 2, 1)).permute(0, 2, 1)
+            lvf_t = self.temporal_cnn(feat_t)          # (B, d_model, T')
+
+        lvf = lvf_t.permute(0, 2, 1)                   # (B, T', d_model)
         return lvf
 
 
@@ -139,12 +285,29 @@ class SMKD(nn.Module):
       Stage 3 – Decouple training: independent classifiers, CTC only on contextual.
     """
 
-    def __init__(self, num_classes: int, d_model: int = 512, hidden_size: int = 512):
+    def __init__(
+        self,
+        num_classes: int,
+        d_model: int = 512,
+        hidden_size: int = 512,
+        backbone: str = "resnet18",
+        temporal_conv_type: str = "standard",
+        multi_scale_temporal: bool = False,
+        multi_scale_dilation_rates: list = None,
+        use_tsm: bool = False,
+    ):
         super().__init__()
         self.num_classes = num_classes
         self.d_model = d_model
 
-        self.visual_module = VisualModule(d_model=d_model)
+        self.visual_module = VisualModule(
+            d_model=d_model,
+            backbone_name=backbone,
+            temporal_conv_type=temporal_conv_type,
+            multi_scale=multi_scale_temporal,
+            multi_scale_dilations=multi_scale_dilation_rates,
+            use_tsm=use_tsm,
+        )
         self.contextual_module = ContextualModule(d_model=d_model, hidden_size=hidden_size)
 
         # Shared classifier (used in stages 1 & 2)

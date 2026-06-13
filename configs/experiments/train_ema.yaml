@@ -1,0 +1,14 @@
+# =============================================================================
+# EMA (Exponential Moving Average)
+# Maintains EMA copy of weights for more stable evaluation
+# =============================================================================
+data:
+  synthetic: true
+  batch_size: 2
+optimization:
+  use_ema: true
+  ema_decay: 0.999
+schedule:
+  epochs: 100
+output:
+  experiment_name: "train_ema"

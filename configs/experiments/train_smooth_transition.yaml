@@ -1,0 +1,13 @@
+# =============================================================================
+# Smooth Stage Transitions
+# Linear ramp instead of hard cutoffs at stage 1→2 and stage 2→3 boundaries
+# =============================================================================
+data:
+  synthetic: true
+  batch_size: 2
+schedule:
+  epochs: 100
+  smooth_transitions: true
+  smooth_transition_epochs: 5
+output:
+  experiment_name: "train_smooth_transition"

@@ -1,0 +1,14 @@
+# =============================================================================
+# TSM (Temporal Shift Module)
+# Zero-extra-parameter temporal modeling baked into ResNet-18 backbone
+# =============================================================================
+data:
+  synthetic: true
+  batch_size: 2
+model:
+  backbone: "resnet18"
+  use_tsm: true
+schedule:
+  epochs: 100
+output:
+  experiment_name: "model_tsm"
