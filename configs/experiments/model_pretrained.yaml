@@ -1,0 +1,14 @@
+# =============================================================================
+# ImageNet Pretrained ResNet-18 backbone (unfrozen — full fine-tuning)
+# =============================================================================
+data:
+  synthetic: true
+  batch_size: 2
+model:
+  backbone: "resnet18"
+  pretrained_backbone: true
+  freeze_backbone: false
+schedule:
+  epochs: 100
+output:
+  experiment_name: "model_pretrained"

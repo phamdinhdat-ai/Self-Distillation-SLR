@@ -23,6 +23,8 @@ model:
   d_model: 512
   hidden_size: 512
   backbone: "resnet18"         # one of: resnet18, mobilenet_v3_small, efficientnet_b0
+  pretrained_backbone: false   # load ImageNet pretrained weights
+  freeze_backbone: false       # freeze backbone (feature extraction mode)
   temporal_conv_type: "standard"  # standard | depthwise_separable
   multi_scale_temporal: false
   multi_scale_dilation_rates: [1, 2]

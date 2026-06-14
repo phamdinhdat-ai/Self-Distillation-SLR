@@ -164,6 +164,8 @@ class Trainer:
             multi_scale_temporal=cfg.get("multi_scale_temporal", False),
             multi_scale_dilation_rates=cfg.get("multi_scale_dilation_rates", [1, 2]),
             use_tsm=cfg.get("use_tsm", False),
+            pretrained_backbone=cfg.get("pretrained_backbone", False),
+            freeze_backbone=cfg.get("freeze_backbone", False),
         ).to(self.device)
 
         if self.use_data_parallel:
@@ -317,7 +319,13 @@ class Trainer:
                   f"{main_trainable:>10,} active   │  {grand_mb:.1f} MB total")
 
         print(f"  d_model          : {self.raw_model.d_model}")
-        print(f"  backbone         : {self.cfg.get('backbone', 'resnet18')}")
+        backbone_name = self.cfg.get("backbone", "resnet18")
+        backbone_note = backbone_name
+        if self.cfg.get("pretrained_backbone", False):
+            backbone_note += " (ImageNet pretrained)"
+        if self.cfg.get("freeze_backbone", False):
+            backbone_note += " [FROZEN]"
+        print(f"  backbone         : {backbone_note}")
         print(f"  temporal conv    : {self.cfg.get('temporal_conv_type', 'standard')}")
         print(f"  total epochs     : {self.total_epochs}")
         print(f"  stage schedule   :")

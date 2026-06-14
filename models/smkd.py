@@ -24,18 +24,30 @@ BACKBONE_OUTPUT_DIMS = {
 }
 
 
-def build_backbone(name: str) -> nn.Module:
-    """Returns a (feature_dim, spatial_encoder) pair."""
+def build_backbone(name: str, pretrained: bool = False) -> tuple:
+    """
+    Returns (spatial_encoder, feature_dim).
+
+    Args:
+        name: one of 'resnet18', 'mobilenet_v3_small', 'efficientnet_b0'
+        pretrained: if True, load ImageNet-pretrained weights
+    """
+    from torchvision.models import (
+        ResNet18_Weights, MobileNet_V3_Small_Weights,
+        EfficientNet_B0_Weights,
+    )
     if name == "resnet18":
-        backbone = resnet18(weights=None)
+        weights = ResNet18_Weights.IMAGENET1K_V1 if pretrained else None
+        backbone = resnet18(weights=weights)
         return nn.Sequential(*list(backbone.children())[:-1]), 512
     elif name == "mobilenet_v3_small":
-        backbone = mobilenet_v3_small(weights=None)
-        # Remove classifier; keep feature extractor
+        weights = MobileNet_V3_Small_Weights.IMAGENET1K_V1 if pretrained else None
+        backbone = mobilenet_v3_small(weights=weights)
         modules = list(backbone.children())[:-1]  # drop the classifier head
         return nn.Sequential(*modules, nn.AdaptiveAvgPool2d((1, 1))), 576
     elif name == "efficientnet_b0":
-        backbone = efficientnet_b0(weights=None)
+        weights = EfficientNet_B0_Weights.IMAGENET1K_V1 if pretrained else None
+        backbone = efficientnet_b0(weights=weights)
         modules = list(backbone.children())[:-1]  # drop classifier
         return nn.Sequential(*modules, nn.AdaptiveAvgPool2d((1, 1))), 1280
     else:
@@ -117,12 +129,22 @@ class VisualModule(nn.Module):
         multi_scale: bool = False,
         multi_scale_dilations: list = None,
         use_tsm: bool = False,
+        pretrained_backbone: bool = False,
+        freeze_backbone: bool = False,
     ):
         super().__init__()
 
         # 2D spatial backbone
-        self.spatial_encoder, bb_dim = build_backbone(backbone_name)
+        self.spatial_encoder, bb_dim = build_backbone(backbone_name, pretrained=pretrained_backbone)
         self.backbone_dim = bb_dim
+        self.backbone_name = backbone_name
+        self.pretrained = pretrained_backbone
+
+        # Optionally freeze the backbone for feature extraction
+        if freeze_backbone:
+            for p in self.spatial_encoder.parameters():
+                p.requires_grad_(False)
+
         self.use_tsm = use_tsm and backbone_name == "resnet18"
         self.tsm = TemporalShift() if self.use_tsm else None
 
@@ -295,6 +317,8 @@ class SMKD(nn.Module):
         multi_scale_temporal: bool = False,
         multi_scale_dilation_rates: list = None,
         use_tsm: bool = False,
+        pretrained_backbone: bool = False,
+        freeze_backbone: bool = False,
     ):
         super().__init__()
         self.num_classes = num_classes
@@ -307,6 +331,8 @@ class SMKD(nn.Module):
             multi_scale=multi_scale_temporal,
             multi_scale_dilations=multi_scale_dilation_rates,
             use_tsm=use_tsm,
+            pretrained_backbone=pretrained_backbone,
+            freeze_backbone=freeze_backbone,
         )
         self.contextual_module = ContextualModule(d_model=d_model, hidden_size=hidden_size)
 

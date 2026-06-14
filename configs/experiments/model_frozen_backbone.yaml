@@ -1,0 +1,15 @@
+# =============================================================================
+# Frozen pretrained backbone (feature extraction mode)
+# ResNet-18 frozen → only temporal CNN + BiLSTM + classifiers are trained
+# =============================================================================
+data:
+  synthetic: true
+  batch_size: 2
+model:
+  backbone: "resnet18"
+  pretrained_backbone: true
+  freeze_backbone: true
+schedule:
+  epochs: 100
+output:
+  experiment_name: "model_frozen_backbone"

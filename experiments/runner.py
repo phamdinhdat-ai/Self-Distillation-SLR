@@ -73,6 +73,8 @@ def flatten_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     flat["d_model"] = model.get("d_model", 512)
     flat["hidden_size"] = model.get("hidden_size", 512)
     flat["backbone"] = model.get("backbone", "resnet18")
+    flat["pretrained_backbone"] = model.get("pretrained_backbone", False)
+    flat["freeze_backbone"] = model.get("freeze_backbone", False)
     flat["temporal_conv_type"] = model.get("temporal_conv_type", "standard")
     flat["multi_scale_temporal"] = model.get("multi_scale_temporal", False)
     flat["multi_scale_dilation_rates"] = model.get("multi_scale_dilation_rates", [1, 2])
