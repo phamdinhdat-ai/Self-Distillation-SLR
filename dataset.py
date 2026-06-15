@@ -83,6 +83,7 @@ class Vocabulary:
 # ---------------------------------------------------------------------------
 
 def build_transforms(split: str, img_size: int = 224):
+    """Full transform pipeline (used when no cache)."""
     base = [transforms.Resize(256)]
     if split == "train":
         aug = [
@@ -94,6 +95,36 @@ def build_transforms(split: str, img_size: int = 224):
 
     return transforms.Compose(base + aug + [
         transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                              std=[0.229, 0.224, 0.225]),
+    ])
+
+
+def build_cache_transform():
+    """
+    Pre-cache transform: resize to 256, convert to tensor, no crop/normalize.
+    Crop/flip/normalize are applied on-the-fly when loading from cache.
+    """
+    return transforms.Compose([
+        transforms.Resize(256),
+        transforms.ToTensor(),
+    ])
+
+
+def build_load_transform(split: str, img_size: int = 224):
+    """
+    On-the-fly transform applied when loading from cache.
+    Assumes input is a (3, 256, 256) tensor.
+    """
+    if split == "train":
+        aug = [
+            transforms.RandomCrop(img_size),
+            transforms.RandomHorizontalFlip(p=0.5),
+        ]
+    else:
+        aug = [transforms.CenterCrop(img_size)]
+
+    return transforms.Compose(aug + [
         transforms.Normalize(mean=[0.485, 0.456, 0.406],
                               std=[0.229, 0.224, 0.225]),
     ])
@@ -156,6 +187,8 @@ class PhoenixDataset(Dataset):
         img_size: int = 224,
         max_frames: int = 300,
         synthetic: bool = False,
+        # Frame caching
+        cache_dir: Optional[str] = None,
         # Temporal augmentation params
         temporal_aug_enabled: bool = False,
         temporal_mask_prob: float = 0.3,
@@ -168,7 +201,14 @@ class PhoenixDataset(Dataset):
         self.img_size = img_size
         self.max_frames = max_frames
         self.synthetic = synthetic
-        self.transform = build_transforms(split, img_size)
+        self.transform = build_transforms(split, img_size)  # fallback (no cache)
+
+        # Frame caching
+        self.cache_dir = cache_dir
+        self.cache_transform = build_cache_transform()
+        self.load_transform = build_load_transform(split, img_size)
+        self.cache_hits = 0
+        self.cache_misses = 0
 
         # Temporal augmentation (only applied during training)
         self.temporal_aug_enabled = temporal_aug_enabled and split == "train"
@@ -259,6 +299,9 @@ class PhoenixDataset(Dataset):
             n_frames = int(sample.get("n_frames", 60))
             n_frames = min(n_frames, self.max_frames)
             frames = torch.randn(n_frames, 3, self.img_size, self.img_size)
+        elif self.cache_dir is not None:
+            # Try to load pre-cached frames (resized tensor), then apply crop/flip/norm
+            frames = self._load_cached_or_process(sample)
         else:
             frames = self._load_frames(sample["frame_dir"])
 
@@ -274,6 +317,47 @@ class PhoenixDataset(Dataset):
             "labels": label_ids,     # (N_gloss,)
             "gloss_ids": self.vocab.encode(sample["glosses"]),
             "id": sample["id"],
+        }
+
+    def _cache_path(self, sample_id: str) -> str:
+        """Path to the cached frame tensor for a sample."""
+        # Include img_size in key since it affects the subsampled frame count
+        key = f"{sample_id}_sz{self.img_size}_mf{self.max_frames}.pt"
+        return os.path.join(self.cache_dir, key)
+
+    def _load_cached_or_process(self, sample: dict) -> torch.Tensor:
+        """
+        Load frames from cache if available; otherwise process and save to cache.
+
+        Cache stores (T, 3, 256, 256) tensors (resized, not cropped/normalized).
+        On load, apply RandomCrop/CenterCrop + Normalize on-the-fly.
+        """
+        cache_path = self._cache_path(sample["id"])
+
+        if os.path.exists(cache_path):
+            self.cache_hits += 1
+            frames = torch.load(cache_path, map_location="cpu", weights_only=True)
+            # Apply crop + normalize on-the-fly
+            frames = torch.stack([self.load_transform(f) for f in frames])
+            return frames
+
+        # Cache miss — process frames and save
+        self.cache_misses += 1
+        raw_frames = self._load_frames_raw(sample["frame_dir"])
+        # Save resized-but-not-cropped tensors to cache
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        torch.save(raw_frames.cpu(), cache_path)
+        # Apply crop + normalize
+        frames = torch.stack([self.load_transform(f) for f in raw_frames])
+        return frames
+
+    def cache_stats(self) -> dict:
+        """Return cache hit/miss statistics."""
+        return {
+            "hits": self.cache_hits,
+            "misses": self.cache_misses,
+            "total": self.cache_hits + self.cache_misses,
+            "hit_rate": self.cache_hits / max(1, self.cache_hits + self.cache_misses),
         }
 
     def _apply_temporal_aug(self, frames: torch.Tensor) -> torch.Tensor:
@@ -304,7 +388,37 @@ class PhoenixDataset(Dataset):
 
         return frames
 
+    def _load_frames_raw(self, frame_dir: str) -> torch.Tensor:
+        """
+        Load frames, apply ONLY Resize+ToTensor (no crop, no normalize).
+        Returns: (T, 3, 256, 256) tensor — ready for caching.
+        """
+        paths: List[str] = []
+        for pattern in self.FRAME_GLOBS:
+            paths = sorted(glob.glob(os.path.join(frame_dir, pattern)))
+            if paths:
+                break
+
+        if not paths:
+            raise FileNotFoundError(
+                f"No image frames found in '{frame_dir}' "
+                f"(looked for {self.FRAME_GLOBS})."
+            )
+
+        # Sub-sample uniformly to max_frames
+        if len(paths) > self.max_frames:
+            step = len(paths) / self.max_frames
+            paths = [paths[int(i * step)] for i in range(self.max_frames)]
+
+        frames = [self.cache_transform(Image.open(p).convert("RGB")) for p in paths]
+        return torch.stack(frames)  # (T, 3, 256, 256)
+
     def _load_frames(self, frame_dir: str) -> torch.Tensor:
+        """
+        Full pipeline: load images, apply all transforms (resize, crop, normalize).
+        Used when cache_dir is None.
+        Returns: (T, 3, img_size, img_size) normalized tensor.
+        """
         paths: List[str] = []
         for pattern in self.FRAME_GLOBS:
             paths = sorted(glob.glob(os.path.join(frame_dir, pattern)))

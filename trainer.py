@@ -29,6 +29,7 @@ Multi-GPU:
 """
 
 import copy
+import glob
 import os
 import time
 from typing import List, Optional
@@ -120,6 +121,7 @@ class Trainer:
             img_size=cfg.get("img_size", 224),
             max_frames=cfg.get("max_frames", 300),
             synthetic=cfg.get("synthetic", True),
+            cache_dir=cfg.get("cache_dir", None),
             temporal_aug_enabled=cfg.get("temporal_aug_enabled", False),
             temporal_mask_prob=cfg.get("temporal_mask_prob", 0.3),
             temporal_mask_max_ratio=cfg.get("temporal_mask_max_ratio", 0.15),
@@ -132,6 +134,7 @@ class Trainer:
             img_size=cfg.get("img_size", 224),
             max_frames=cfg.get("max_frames", 300),
             synthetic=cfg.get("synthetic", True),
+            cache_dir=cfg.get("cache_dir", None),
         )
         self.vocab = train_ds.vocab
 
@@ -257,6 +260,25 @@ class Trainer:
             "time": [],
         }
 
+        # ---- Per-step timing profiler ----
+        # Cumulative seconds per phase, reset each epoch
+        self.step_timers = {
+            "data_xfer": 0.0,     # batch → GPU
+            "forward": 0.0,       # model(frames)
+            "gsba": 0.0,          # GSBA algorithm (stage 2)
+            "loss": 0.0,          # criterion.forward()
+            "backward": 0.0,      # loss.backward() + optimizer.step()
+            "total": 0.0,
+        }
+        # Per-epoch history for each timer
+        for key in list(self.step_timers.keys()):
+            self.history[f"t_{key}"] = []
+
+        # ---- Stage checkpointing ----
+        self.save_stage_ckpts = cfg.get("save_stage_checkpoints", True)
+        self.resume_from_stage = cfg.get("resume_from_stage", 0)  # 0 = from scratch
+        self.resume_ckpt_path = cfg.get("resume_ckpt_path", "")
+
         self._print_setup_summary()
 
     # ------------------------------------------------------------------
@@ -296,6 +318,8 @@ class Trainer:
         print(f"  batch size      : {self.cfg.get('batch_size', 2)}"
               + (f"  ({self.cfg.get('batch_size', 2) // max(self.n_gpus,1)} per GPU)"
                  if self.use_data_parallel else ""))
+        if self.cfg.get("cache_dir"):
+            print(f"  frame cache     : {self.cfg['cache_dir']}")
 
         # ---- Model parameter summary ----
         print(f"  ── Model parameters ──")
@@ -342,6 +366,11 @@ class Trainer:
             print(f"      stage 3 : (not reached - total_epochs <= stage2_end)")
         print(f"  eval every      : {self.eval_every} epochs")
         print(f"  checkpoint dir  : {self.ckpt_dir}")
+        if self.save_stage_ckpts:
+            print(f"  stage ckpts     : saved at each stage boundary")
+        if self.resume_from_stage > 0:
+            ckpt_info = self.resume_ckpt_path or "auto-find"
+            print(f"  resume          : from stage {self.resume_from_stage} ({ckpt_info})")
 
         # Enhancement features summary
         features = []
@@ -441,6 +470,13 @@ class Trainer:
             num_classes=len(self.vocab),
             d_model=self.cfg.get("d_model", 512),
             hidden_size=self.cfg.get("hidden_size", 512),
+            backbone=self.cfg.get("backbone", "resnet18"),
+            temporal_conv_type=self.cfg.get("temporal_conv_type", "standard"),
+            multi_scale_temporal=self.cfg.get("multi_scale_temporal", False),
+            multi_scale_dilation_rates=self.cfg.get("multi_scale_dilation_rates", [1, 2]),
+            use_tsm=self.cfg.get("use_tsm", False),
+            pretrained_backbone=False,  # teacher loads its own weights
+            freeze_backbone=False,
         ).to(self.device)
         self.teacher_model.load_state_dict(ckpt["model"])
         self.teacher_model.eval()
@@ -453,23 +489,30 @@ class Trainer:
     # ------------------------------------------------------------------
 
     def _train_step(self, batch: dict, stage: int, epoch: int = 1, batch_idx: int = 0):
+        t0 = time.time()
+
+        # --- Data transfer ---
         frames = batch["frames"].to(self.device, non_blocking=True)
         labels = batch["labels"].to(self.device, non_blocking=True)
         input_lengths = batch["input_lengths"].to(self.device, non_blocking=True)
         target_lengths = batch["target_lengths"].to(self.device, non_blocking=True)
         gloss_seqs = batch["gloss_seqs"]
+        if self.device.type == "cuda":
+            torch.cuda.synchronize()
+        t_data = time.time()
 
-        # Forward pass with optional AMP
+        # --- Forward pass ---
         with torch.cuda.amp.autocast() if self.use_amp else torch.no_grad() if False else torch.enable_grad():
             out = self.model(frames)
             logits_v, logits_g, gcf, lvf = out["logits_v"], out["logits_g"], out["gcf"], out["lvf"]
 
         T_prime = logits_v.size(1)
-        # input_lengths is raw frame count T; VisualModule already halves T→T'
-        # so adj_lengths should be T_prime (actual output length), not T/2
         adj_lengths = torch.full((frames.size(0),), T_prime, dtype=torch.long, device=self.device)
+        if self.device.type == "cuda":
+            torch.cuda.synchronize()
+        t_forward = time.time()
 
-        # ---- GSBA (stage 2) ----
+        # --- GSBA (stage 2) ---
         seg_labels = None
         seg_margins = None
         if stage == 2:
@@ -488,18 +531,21 @@ class Trainer:
                         gcf=gcf.detach(), classifier_weights=w_n.detach(),
                         spike_labels=spike_labels, gloss_seqs=gloss_seqs, d=self.gsba_d,
                     )
+        if self.device.type == "cuda":
+            torch.cuda.synchronize()
+        t_gsba = time.time()
 
-        # ---- Teacher logits for self-distillation ----
+        # --- Teacher logits for self-distillation ---
         teacher_logits_g = None
         if self.teacher_model is not None:
             with torch.no_grad():
                 teacher_out = self.teacher_model(frames)
                 teacher_logits_g = teacher_out["logits_g"].detach()
 
-        # ---- Set effective α for curriculum + smooth transitions ----
+        # --- Set effective α for curriculum + smooth transitions ---
         self.criterion.alpha = self._get_alpha(epoch, stage) * self._get_smooth_factor(epoch)
 
-        # ---- Loss computation ----
+        # --- Loss computation ---
         loss, loss_dict = self.criterion(
             logits_v=logits_v, logits_g=logits_g, targets=labels,
             input_lengths=adj_lengths, target_lengths=target_lengths,
@@ -507,14 +553,16 @@ class Trainer:
             lvf=lvf, gcf=gcf,
             teacher_logits_g=teacher_logits_g,
         )
+        if self.device.type == "cuda":
+            torch.cuda.synchronize()
+        t_loss = time.time()
 
-        # ---- Backward with gradient accumulation & optional AMP ----
+        # --- Backward + optimizer step ---
         if self.use_amp:
             self.scaler.scale(loss / self.grad_accum_steps).backward()
         else:
             (loss / self.grad_accum_steps).backward()
 
-        # Step optimizer only after grad_accum_steps micro-batches
         if (batch_idx + 1) % self.grad_accum_steps == 0:
             if self.use_amp:
                 self.scaler.unscale_(self.optimizer)
@@ -526,6 +574,20 @@ class Trainer:
                 self.optimizer.step()
             self.optimizer.zero_grad()
             self._update_ema()
+
+        if self.device.type == "cuda":
+            torch.cuda.synchronize()
+        t_backward = time.time()
+
+        # --- Accumulate timing ---
+        # Only count backward time for steps that actually step the optimizer
+        n_accum = self.grad_accum_steps
+        self.step_timers["data_xfer"] += (t_data - t0)
+        self.step_timers["forward"] += (t_forward - t_data)
+        self.step_timers["gsba"] += (t_gsba - t_forward)
+        self.step_timers["loss"] += (t_loss - t_gsba)
+        self.step_timers["backward"] += (t_backward - t_loss)
+        self.step_timers["total"] += (t_backward - t0)
 
         return loss_dict
 
@@ -576,7 +638,24 @@ class Trainer:
         print(_box_title("Training started"))
         train_start = time.time()
 
-        for epoch in range(1, self.total_epochs + 1):
+        # Resume from stage checkpoint if requested
+        start_epoch = 1
+        if self.resume_from_stage > 0 and self.resume_ckpt_path:
+            resume_ep = self._load_stage_checkpoint(self.resume_ckpt_path)
+            start_epoch = resume_ep + 1
+        elif self.resume_from_stage > 0:
+            # Auto-find stage checkpoint
+            for stage in range(self.resume_from_stage - 1, 0, -1):
+                pattern = os.path.join(self.ckpt_dir, f"smkd_stage{stage}_ep*.pt")
+                matches = sorted(glob.glob(pattern))
+                if matches:
+                    resume_ep = self._load_stage_checkpoint(matches[-1])
+                    start_epoch = resume_ep + 1
+                    break
+            else:
+                print(f"  [!] No stage checkpoint found for resume_from_stage={self.resume_from_stage}, starting from scratch")
+
+        for epoch in range(start_epoch, self.total_epochs + 1):
             epoch_start = time.time()
 
             stage = self._current_stage(epoch)
@@ -584,10 +663,17 @@ class Trainer:
 
             if self.raw_model.stage != stage:
                 self._set_stage(stage)
+                # Save stage checkpoint at boundary (end of previous stage)
+                if self.save_stage_ckpts and epoch > 1:
+                    self._save_stage_checkpoint(stage - 1, epoch - 1)
                 print()
                 print(_box_title(f"Stage {stage}: {STAGE_NAMES[stage]}"))
                 if stage == 3:
                     self.optimizer = Adam(self.model.parameters(), lr=4e-6)
+
+            # Reset step timers for this epoch
+            for k in self.step_timers:
+                self.step_timers[k] = 0.0
 
             # Update α on criterion for the current epoch
             self.criterion.alpha = self._get_alpha(epoch, stage)
@@ -626,17 +712,28 @@ class Trainer:
             self.history["total"].append(avg_losses.get("total"))
             self.history["wer"].append(wer)
             self.history["time"].append(epoch_time)
-            # Enhancement loss keys
             for ek in ("align", "entropy", "kd"):
                 if ek not in self.history:
                     self.history[ek] = []
                 self.history[ek].append(avg_losses.get(ek))
+            # Per-step timing history
+            for tk in self.step_timers:
+                self.history[f"t_{tk}"].append(self.step_timers[tk])
 
             # --- pretty print ---
             self._print_epoch_line(epoch, stage, avg_losses, wer, improved, epoch_time)
 
+            # Timing breakdown every eval or every 10 epochs
+            if run_eval or epoch % 10 == 0:
+                self._print_timing_breakdown(epoch)
+
             if stage < 3:
                 self.scheduler.step()
+
+        # Save final stage checkpoint
+        final_stage = self._current_stage(self.total_epochs)
+        if self.save_stage_ckpts:
+            self._save_stage_checkpoint(final_stage, self.total_epochs)
 
         total_time = time.time() - train_start
         self._print_final_summary(total_time)
@@ -684,11 +781,24 @@ class Trainer:
             print(f"  best WER        : {self.best_wer:.2f}%  (epoch {self.best_epoch})")
         else:
             print("  best WER        : (no evaluation ran)")
-        # Final param recap
         n_params = sum(p.numel() for p in self.raw_model.parameters())
         n_trainable = sum(p.numel() for p in self.raw_model.parameters() if p.requires_grad)
         print(f"  model params    : {n_params:,} total  |  {n_trainable:,} trainable  |  "
               f"{n_params - n_trainable:,} frozen")
+
+        # Cache statistics
+        train_ds = self.train_loader.dataset
+        if hasattr(train_ds, "cache_stats") and train_ds.cache_dir:
+            stats = train_ds.cache_stats()
+            train_label = "train"
+            val_ds = self.val_loader.dataset
+            val_stats = val_ds.cache_stats() if hasattr(val_ds, "cache_stats") else None
+            print(f"  frame cache     : {train_label} {stats['hits']}/{stats['total']} hits "
+                  f"({stats['hit_rate']:.0%})", end="")
+            if val_stats:
+                print(f"  |  dev {val_stats['hits']}/{val_stats['total']} hits "
+                      f"({val_stats['hit_rate']:.0%})", end="")
+            print()
         print(_hr("="))
 
     # ------------------------------------------------------------------
@@ -697,8 +807,19 @@ class Trainer:
 
     def _save_checkpoint(self, epoch: int, wer: float):
         path = os.path.join(self.ckpt_dir, f"smkd_best_ep{epoch}_wer{wer:.2f}.pt")
+        self._write_checkpoint(path, epoch, wer)
+        print(f"           >> checkpoint saved: {os.path.basename(path)}")
+
+    def _save_stage_checkpoint(self, stage: int, epoch: int):
+        """Save a checkpoint at the end of a training stage for later resume."""
+        path = os.path.join(self.ckpt_dir, f"smkd_stage{stage}_ep{epoch}.pt")
+        self._write_checkpoint(path, epoch, None)
+        print(f"           >> stage {stage} checkpoint saved: {os.path.basename(path)}")
+
+    def _write_checkpoint(self, path: str, epoch: int, wer):
         ckpt = {
             "epoch": epoch, "wer": wer,
+            "stage": self.raw_model.stage,
             "model": self.raw_model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "vocab": self.vocab,
@@ -709,7 +830,42 @@ class Trainer:
         if self.use_amp and self.scaler is not None:
             ckpt["scaler"] = self.scaler.state_dict()
         torch.save(ckpt, path)
-        print(f"           >> checkpoint saved: {os.path.basename(path)}")
+
+    def _load_stage_checkpoint(self, ckpt_path: str):
+        """Resume training from a previously saved stage checkpoint."""
+        print(f"\n  [*] Resuming from stage checkpoint: {ckpt_path}")
+        ckpt = torch.load(ckpt_path, map_location=self.device)
+        self.raw_model.load_state_dict(ckpt["model"])
+        self.raw_model.set_stage(ckpt.get("stage", self.raw_model.stage))
+        self.optimizer.load_state_dict(ckpt["optimizer"])
+        self.history = ckpt.get("history", self.history)
+
+        if self.use_ema and self.ema_model is not None and "ema_model" in ckpt:
+            self.ema_model.load_state_dict(ckpt["ema_model"])
+        if self.use_amp and self.scaler is not None and "scaler" in ckpt:
+            self.scaler.load_state_dict(ckpt["scaler"])
+
+        resume_epoch = ckpt["epoch"]
+        resume_wer = ckpt.get("wer")
+        print(f"  [*] Resumed at epoch {resume_epoch}, stage {self.raw_model.stage}"
+              + (f", WER={resume_wer:.2f}%" if resume_wer else ""))
+        return resume_epoch
+
+    def _print_timing_breakdown(self, epoch: int):
+        """Print per-step timing breakdown for the current epoch."""
+        total = self.step_timers["total"]
+        if total < 0.01:
+            return
+
+        def pct(key):
+            return 100.0 * self.step_timers[key] / total
+
+        print(f"  ⏱  timing epoch {epoch:3d}: "
+              f"data={self.step_timers['data_xfer']:5.1f}s ({pct('data_xfer'):4.1f}%)  "
+              f"fwd={self.step_timers['forward']:5.1f}s ({pct('forward'):4.1f}%)  "
+              f"gsba={self.step_timers['gsba']:5.1f}s ({pct('gsba'):4.1f}%)  "
+              f"loss={self.step_timers['loss']:5.1f}s ({pct('loss'):4.1f}%)  "
+              f"bwd={self.step_timers['backward']:5.1f}s ({pct('backward'):4.1f}%)")
 
     # ------------------------------------------------------------------
     # Plotting

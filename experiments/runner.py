@@ -60,6 +60,7 @@ def flatten_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     flat["num_workers"] = data.get("num_workers", 0)
     flat["batch_size"] = data.get("batch_size", 2)
     flat["synthetic"] = data.get("synthetic", True)
+    flat["cache_dir"] = data.get("cache_dir", None)
 
     # Temporal augmentation
     ta = data.get("temporal_aug", {})
@@ -137,6 +138,9 @@ def flatten_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     out = cfg.get("output", {})
     flat["ckpt_dir"] = out.get("ckpt_dir", "./checkpoints")
     flat["experiment_name"] = out.get("experiment_name", "default")
+    flat["save_stage_checkpoints"] = out.get("save_stage_checkpoints", True)
+    flat["resume_from_stage"] = out.get("resume_from_stage", 0)
+    flat["resume_ckpt_path"] = out.get("resume_ckpt_path", "")
 
     return flat
 

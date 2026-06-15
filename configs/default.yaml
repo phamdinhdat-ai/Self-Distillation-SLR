@@ -9,8 +9,7 @@ data:
   img_size: 224
   max_frames: 300
   num_workers: 0
-  batch_size: 8
-
+  batch_size: 8  cache_dir: null              # e.g. "./data/cache" — caches resized frames to .pt
   # Temporal data augmentation (off by default = paper baseline)
   temporal_aug:
     enabled: false
@@ -101,3 +100,6 @@ hardware:
 output:
   ckpt_dir: "./checkpoints"
   experiment_name: "default"
+  save_stage_checkpoints: true   # save checkpoint at end of each stage
+  resume_from_stage: 0           # 0=from scratch, 2=skip to stage 2, 3=skip to stage 3
+  resume_ckpt_path: ""           # path to specific checkpoint; auto-found if empty
