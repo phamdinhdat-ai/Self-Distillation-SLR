@@ -272,13 +272,18 @@ class NormalisedClassifier(nn.Module):
     """
     Linear classifier whose weight vectors are L2-normalised (no bias).
     This lets cosine similarity drive feature alignment.
+
+    Cosine similarities are bounded in [-1, 1], making softmax nearly uniform
+    at initialization. A temperature scale sharpens the distribution so CTC can
+    form strong peaks (typical values: 16–32).
     """
 
-    def __init__(self, d_model: int, num_classes: int):
+    def __init__(self, d_model: int, num_classes: int, scale: float = 20.0):
         super().__init__()
         # +1 for CTC blank token
         self.weight = nn.Parameter(torch.randn(num_classes + 1, d_model))
         nn.init.kaiming_uniform_(self.weight)
+        self.scale = scale
 
     def forward(self, feat: torch.Tensor) -> torch.Tensor:
         """
@@ -289,7 +294,7 @@ class NormalisedClassifier(nn.Module):
         """
         w = F.normalize(self.weight, p=2, dim=1)          # (C+1, d)
         feat_n = F.normalize(feat, p=2, dim=-1)            # (B, T', d)
-        logits = feat_n @ w.t()                            # (B, T', C+1)
+        logits = feat_n @ w.t() * self.scale               # (B, T', C+1)
         return logits
 
 

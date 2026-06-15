@@ -465,7 +465,9 @@ class Trainer:
             logits_v, logits_g, gcf, lvf = out["logits_v"], out["logits_g"], out["gcf"], out["lvf"]
 
         T_prime = logits_v.size(1)
-        adj_lengths = torch.clamp(input_lengths // 2, max=T_prime)
+        # input_lengths is raw frame count T; VisualModule already halves T→T'
+        # so adj_lengths should be T_prime (actual output length), not T/2
+        adj_lengths = torch.full((frames.size(0),), T_prime, dtype=torch.long, device=self.device)
 
         # ---- GSBA (stage 2) ----
         seg_labels = None

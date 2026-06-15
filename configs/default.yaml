@@ -9,7 +9,7 @@ data:
   img_size: 224
   max_frames: 300
   num_workers: 0
-  batch_size: 2
+  batch_size: 8
 
   # Temporal data augmentation (off by default = paper baseline)
   temporal_aug:
@@ -23,7 +23,7 @@ model:
   d_model: 512
   hidden_size: 512
   backbone: "resnet18"         # one of: resnet18, mobilenet_v3_small, efficientnet_b0
-  pretrained_backbone: false   # load ImageNet pretrained weights
+  pretrained_backbone: true    # load ImageNet pretrained weights
   freeze_backbone: false       # freeze backbone (feature extraction mode)
   temporal_conv_type: "standard"  # standard | depthwise_separable
   multi_scale_temporal: false
@@ -48,8 +48,8 @@ loss:
 
   # Entropy regularization on blank posterior (anti-spike)
   entropy_regularization:
-    enabled: false
-    weight: 0.01               # positive = maximize entropy (anti-spike)
+    enabled: true
+    weight: 0.05               # positive = maximize entropy (anti-spike)
 
   # Focal CTC variant
   focal_ctc:
@@ -87,7 +87,7 @@ optimization:
   # AMP (automatic mixed precision)
   use_amp: false
   # Gradient accumulation
-  grad_accum_steps: 1
+  grad_accum_steps: 4
 
   # EMA (exponential moving average)
   use_ema: false
