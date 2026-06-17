@@ -221,13 +221,7 @@ class VisualModule(nn.Module):
             all_feats = torch.cat([main_feat] + ms_feats, dim=1)  # (B, d_model*n_branches, T')
             lvf_t = self.ms_fusion(all_feats)                      # (B, d_model, T')
         else:
-<<<<<<< HEAD
-            if not isinstance(self.backbone_adapter, nn.Identity):
-                # Adapter exists: project bb_dim → d_model before temporal CNN
-                feat_t = self.backbone_adapter(feat_t.permute(0, 2, 1)).permute(0, 2, 1)
-=======
             # temporal_cnn already maps bb_dim → d_model via its first Conv1d
->>>>>>> e97c0eb8ae402085880dd09894caa9f90ccb1299
             lvf_t = self.temporal_cnn(feat_t)          # (B, d_model, T')
 
         lvf = lvf_t.permute(0, 2, 1)                   # (B, T', d_model)
