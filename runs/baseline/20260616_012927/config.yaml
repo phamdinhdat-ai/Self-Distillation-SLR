@@ -1,0 +1,48 @@
+data:
+  synthetic: true
+  img_size: 224
+  max_frames: 300
+  batch_size: 2
+  temporal_aug:
+    enabled: false
+model:
+  d_model: 512
+  hidden_size: 512
+  backbone: resnet18
+  temporal_conv_type: standard
+  multi_scale_temporal: false
+  use_tsm: false
+loss:
+  alpha: 0.5
+  label_smoothing: 0.2
+  alpha_schedule: fixed
+  feature_alignment:
+    enabled: false
+  entropy_regularization:
+    enabled: false
+  focal_ctc:
+    enabled: false
+  gsba_confidence_weight: false
+schedule:
+  epochs: 100
+  stage1_end: 30
+  stage2_end: 90
+  eval_every: 5
+  gsba_update_every: 10
+  smooth_transitions: false
+  self_distill:
+    enabled: false
+optimization:
+  lr: 0.0001
+  lr_milestones:
+  - 40
+  - 60
+  - 80
+  lr_gamma: 0.5
+  use_amp: false
+  grad_accum_steps: 1
+  use_ema: false
+hardware:
+  multi_gpu: true
+output:
+  experiment_name: baseline
