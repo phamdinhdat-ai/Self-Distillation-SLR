@@ -151,14 +151,16 @@ class VisualModule(nn.Module):
         # Adapter to map backbone output to d_model if needed
         if bb_dim != d_model and not multi_scale:
             self.backbone_adapter = nn.Linear(bb_dim, d_model)
+            temporal_in_ch = d_model   # adapter projects bb_dim → d_model
         else:
             self.backbone_adapter = nn.Identity()
+            temporal_in_ch = bb_dim
 
         # 1D temporal CNN
         self.temporal_conv_type = temporal_conv_type
         ConvLayer = DepthwiseSeparableConv1d if temporal_conv_type == "depthwise_separable" else nn.Conv1d
 
-        in_ch = bb_dim
+        in_ch = temporal_in_ch
         self.temporal_cnn = nn.Sequential(
             ConvLayer(in_ch, d_model, kernel_size=5, padding=2),
             nn.BatchNorm1d(d_model),
@@ -219,7 +221,8 @@ class VisualModule(nn.Module):
             all_feats = torch.cat([main_feat] + ms_feats, dim=1)  # (B, d_model*n_branches, T')
             lvf_t = self.ms_fusion(all_feats)                      # (B, d_model, T')
         else:
-            if self.backbone_dim != self.temporal_conv_type and not isinstance(self.backbone_adapter, nn.Identity):
+            if not isinstance(self.backbone_adapter, nn.Identity):
+                # Adapter exists: project bb_dim → d_model before temporal CNN
                 feat_t = self.backbone_adapter(feat_t.permute(0, 2, 1)).permute(0, 2, 1)
             lvf_t = self.temporal_cnn(feat_t)          # (B, d_model, T')
 

@@ -27,9 +27,10 @@ class CTCLoss(nn.Module):
         target_lengths: torch.Tensor,  # (B,)
     ) -> torch.Tensor:
         # nn.CTCLoss expects (T', B, C+1) log-probs
-        log_probs = F.log_softmax(logits, dim=-1)           # (B, T', C+1)
+        # Force float32: CTC has no FP16 CUDA kernel (AMP compatibility)
+        log_probs = F.log_softmax(logits.float(), dim=-1)   # (B, T', C+1)
         log_probs = log_probs.permute(1, 0, 2)              # (T', B, C+1)
-        return self.ctc(log_probs, targets, input_lengths, target_lengths)
+        return self.ctc(log_probs.float(), targets, input_lengths, target_lengths)
 
 
 # ---------------------------------------------------------------------------
