@@ -220,7 +220,7 @@ class Trainer:
 
         # ---- AMP (mixed precision) ----
         self.use_amp = cfg.get("use_amp", False) and self.device.type == "cuda"
-        self.scaler = torch.cuda.amp.GradScaler() if self.use_amp else None
+        self.scaler = torch.amp.GradScaler("cuda") if self.use_amp else None
         self.grad_accum_steps = max(1, cfg.get("grad_accum_steps", 1))
 
         # ---- EMA (exponential moving average of weights) ----
@@ -524,7 +524,7 @@ class Trainer:
         t_data = time.time()
 
         # --- Forward pass ---
-        with torch.cuda.amp.autocast() if self.use_amp else torch.no_grad() if False else torch.enable_grad():
+        with torch.amp.autocast("cuda") if self.use_amp else torch.no_grad() if False else torch.enable_grad():
             out = self.model(frames)
             logits_v, logits_g, gcf, lvf = out["logits_v"], out["logits_g"], out["gcf"], out["lvf"]
 

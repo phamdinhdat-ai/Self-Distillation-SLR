@@ -4,6 +4,7 @@
 # Inherits all defaults; explicitly listed for clarity.
 
 data:
+  
   synthetic: true
   img_size: 224
   max_frames: 300

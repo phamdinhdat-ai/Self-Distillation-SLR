@@ -9,7 +9,8 @@ data:
   img_size: 224
   max_frames: 300
   num_workers: 0
-  batch_size: 8  cache_dir: null              # e.g. "./data/cache" — caches resized frames to .pt
+  batch_size: 8
+  cache_dir: null              # e.g. "./data/cache" — caches resized frames to .pt
   # Temporal data augmentation (off by default = paper baseline)
   temporal_aug:
     enabled: false
