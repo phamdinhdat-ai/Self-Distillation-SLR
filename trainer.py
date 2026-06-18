@@ -31,6 +31,7 @@ Multi-GPU:
 import copy
 import glob
 import os
+import sys
 import time
 from typing import List, Optional
 
@@ -38,6 +39,18 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim import Adam
+
+# ---- Loguru structured logging ----
+from loguru import logger
+
+# Remove default handler; configure console + file sinks
+logger.remove()
+logger.add(
+    sys.stderr,
+    format="<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>",
+    level="INFO",
+    colorize=True,
+)
 from torch.optim.lr_scheduler import MultiStepLR
 from torch.utils.data import DataLoader
 
@@ -114,7 +127,8 @@ class Trainer:
             and self.n_gpus > 1
         )
 
-        print(_box_title("Loading datasets"))
+        logger.info("=" * 60)
+        logger.info("  Loading datasets")
         train_ds = PhoenixDataset(
             root=cfg.get("data_root", "./data/phoenix"),
             split="train",
@@ -140,9 +154,8 @@ class Trainer:
 
         batch_size = cfg.get("batch_size", 2)
         if self.use_data_parallel and batch_size < self.n_gpus:
-            print(f"  [!] batch_size={batch_size} < n_gpus={self.n_gpus}; "
-                  f"some GPUs would get empty shards. Consider batch_size "
-                  f">= {self.n_gpus} (ideally a multiple of {self.n_gpus}).")
+            logger.warning(f"batch_size={batch_size} < n_gpus={self.n_gpus}; "
+                          f"some GPUs would get empty shards")
 
         self.train_loader = DataLoader(
             train_ds, batch_size=batch_size, shuffle=True,
@@ -281,6 +294,14 @@ class Trainer:
 
         self._print_setup_summary()
 
+    def __del__(self):
+        """Remove file log sink on deletion."""
+        if hasattr(self, '_log_file_id'):
+            try:
+                logger.remove(self._log_file_id)
+            except Exception:
+                pass
+
     # ------------------------------------------------------------------
     # Setup summary
     # ------------------------------------------------------------------
@@ -304,73 +325,74 @@ class Trainer:
         if self.teacher_model is not None:
             teacher_total, teacher_trainable, teacher_frozen, teacher_mb = _param_stats(self.teacher_model)
 
-        print(_box_title("SMKD Trainer"))
-        print(f"  device          : {self.device}")
+        logger.info("=" * 60)
+        logger.info("  SMKD Trainer Configuration")
+        logger.info(f"  device          : {self.device}")
         if self.device.type == "cuda":
             gpu_names = ", ".join(
                 torch.cuda.get_device_name(i) for i in range(self.n_gpus)
             )
-            print(f"  GPUs visible    : {self.n_gpus} ({gpu_names})")
-            print(f"  DataParallel    : {'ENABLED' if self.use_data_parallel else 'disabled'}")
-        print(f"  vocab size      : {len(self.vocab)}")
-        print(f"  train / dev     : {len(self.train_loader.dataset)} / "
+            logger.info(f"  GPUs visible    : {self.n_gpus} ({gpu_names})")
+            logger.info(f"  DataParallel    : {'ENABLED' if self.use_data_parallel else 'disabled'}")
+        logger.info(f"  vocab size      : {len(self.vocab)}")
+        logger.info(f"  train / dev     : {len(self.train_loader.dataset)} / "
               f"{len(self.val_loader.dataset)} samples")
-        print(f"  batch size      : {self.cfg.get('batch_size', 2)}"
+        logger.info(f"  batch size      : {self.cfg.get('batch_size', 2)}"
               + (f"  ({self.cfg.get('batch_size', 2) // max(self.n_gpus,1)} per GPU)"
                  if self.use_data_parallel else ""))
         if self.cfg.get("cache_dir"):
-            print(f"  frame cache     : {self.cfg['cache_dir']}")
+            logger.info(f"  frame cache     : {self.cfg['cache_dir']}")
 
         # ---- Model parameter summary ----
-        print(f"  ── Model parameters ──")
-        print(f"  main model        : {main_total:>10,} total  │  "
-              f"{main_trainable:>10,} trainable  │  "
-              f"{main_frozen:>10,} frozen  │  {main_mb:.1f} MB")
+        logger.info(f"  -- Model parameters --")
+        logger.info(f"  main model        : {main_total:>10,} total  |  "
+              f"{main_trainable:>10,} trainable  |  "
+              f"{main_frozen:>10,} frozen  |  {main_mb:.1f} MB")
         if self.use_ema and self.ema_model is not None:
-            print(f"  EMA model         : {ema_total:>10,} total  │  "
-                  f"{ema_trainable:>10,} trainable  │  "
-                  f"{ema_frozen:>10,} frozen  │  {ema_mb:.1f} MB  (all frozen)")
+            logger.info(f"  EMA model         : {ema_total:>10,} total  |  "
+                  f"{ema_trainable:>10,} trainable  |  "
+                  f"{ema_frozen:>10,} frozen  |  {ema_mb:.1f} MB  (all frozen)")
         if self.teacher_model is not None:
-            print(f"  KD teacher model  : {teacher_total:>10,} total  │  "
-                  f"{teacher_trainable:>10,} trainable  │  "
-                  f"{teacher_frozen:>10,} frozen  │  {teacher_mb:.1f} MB  (all frozen)")
+            logger.info(f"  KD teacher model  : {teacher_total:>10,} total  |  "
+                  f"{teacher_trainable:>10,} trainable  |  "
+                  f"{teacher_frozen:>10,} frozen  |  {teacher_mb:.1f} MB  (all frozen)")
 
         # Total across all models
         grand_total = main_total + ema_total + teacher_total
         grand_mb = grand_total * 4 / (1024 * 1024)
         if ema_total > 0 or teacher_total > 0:
-            print(f"  ── combined       : {grand_total:>10,} total  │  "
-                  f"{main_trainable:>10,} active   │  {grand_mb:.1f} MB total")
+            logger.info(f"  -- combined       : {grand_total:>10,} total  |  "
+                  f"{main_trainable:>10,} active   |  {grand_mb:.1f} MB total")
 
-        print(f"  d_model          : {self.raw_model.d_model}")
+        logger.info(f"  d_model          : {self.raw_model.d_model}")
         backbone_name = self.cfg.get("backbone", "resnet18")
         backbone_note = backbone_name
         if self.cfg.get("pretrained_backbone", False):
             backbone_note += " (ImageNet pretrained)"
         if self.cfg.get("freeze_backbone", False):
             backbone_note += " [FROZEN]"
-        print(f"  backbone         : {backbone_note}")
-        print(f"  temporal conv    : {self.cfg.get('temporal_conv_type', 'standard')}")
-        print(f"  total epochs     : {self.total_epochs}")
-        print(f"  stage schedule   :")
+        logger.info(f"  backbone         : {backbone_note}")
+        logger.info(f"  temporal conv    : {self.cfg.get('temporal_conv_type', 'standard')}")
+        logger.info(f"  total epochs     : {self.total_epochs}")
+        logger.info(f"  stage schedule   :")
         s1_end = min(self.stage1_end, self.total_epochs)
-        print(f"      stage 1 (epochs   1-{s1_end:>3}) : {STAGE_NAMES[1]}")
+        logger.info(f"      stage 1 (epochs   1-{s1_end:>3}) : {STAGE_NAMES[1]}")
         if self.stage1_end < self.total_epochs:
             s2_end = min(self.stage2_end, self.total_epochs)
-            print(f"      stage 2 (epochs {self.stage1_end+1:>3}-{s2_end:>3}) : {STAGE_NAMES[2]}")
+            logger.info(f"      stage 2 (epochs {self.stage1_end+1:>3}-{s2_end:>3}) : {STAGE_NAMES[2]}")
         else:
-            print(f"      stage 2 : (not reached - total_epochs <= stage1_end)")
+            logger.info(f"      stage 2 : (not reached - total_epochs <= stage1_end)")
         if self.stage2_end < self.total_epochs:
-            print(f"      stage 3 (epochs {self.stage2_end+1:>3}-{self.total_epochs:>3}) : {STAGE_NAMES[3]}")
+            logger.info(f"      stage 3 (epochs {self.stage2_end+1:>3}-{self.total_epochs:>3}) : {STAGE_NAMES[3]}")
         else:
-            print(f"      stage 3 : (not reached - total_epochs <= stage2_end)")
-        print(f"  eval every      : {self.eval_every} epochs")
-        print(f"  checkpoint dir  : {self.ckpt_dir}")
+            logger.info(f"      stage 3 : (not reached - total_epochs <= stage2_end)")
+        logger.info(f"  eval every      : {self.eval_every} epochs")
+        logger.info(f"  checkpoint dir  : {self.ckpt_dir}")
         if self.save_stage_ckpts:
-            print(f"  stage ckpts     : saved at each stage boundary")
+            logger.info(f"  stage ckpts     : saved at each stage boundary")
         if self.resume_from_stage > 0:
             ckpt_info = self.resume_ckpt_path or "auto-find"
-            print(f"  resume          : from stage {self.resume_from_stage} ({ckpt_info})")
+            logger.info(f"  resume          : from stage {self.resume_from_stage} ({ckpt_info})")
 
         # Enhancement features summary
         features = []
@@ -393,10 +415,10 @@ class Trainer:
         if self.cfg.get("temporal_aug_enabled", False):
             features.append("temporal augmentation")
         if features:
-            print(f"  enhancements    :")
+            logger.info(f"  enhancements    :")
             for feat in features:
-                print(f"      - {feat}")
-        print(_hr("="))
+                logger.info(f"      - {feat}")
+        logger.info("=" * 60)
 
     # ------------------------------------------------------------------
     # Stage helpers
@@ -482,7 +504,7 @@ class Trainer:
         self.teacher_model.eval()
         for p in self.teacher_model.parameters():
             p.requires_grad_(False)
-        print(f"  [*] Loaded self-distillation teacher from: {ckpt_path}")
+        logger.success(f"Loaded self-distillation teacher from: {ckpt_path}")
 
     # ------------------------------------------------------------------
     # Train step
@@ -635,7 +657,8 @@ class Trainer:
     # ------------------------------------------------------------------
 
     def train(self):
-        print(_box_title("Training started"))
+        logger.info("=" * 60)
+        logger.info("  Training started")
         train_start = time.time()
 
         # Resume from stage checkpoint if requested
@@ -653,7 +676,7 @@ class Trainer:
                     start_epoch = resume_ep + 1
                     break
             else:
-                print(f"  [!] No stage checkpoint found for resume_from_stage={self.resume_from_stage}, starting from scratch")
+                logger.warning(f"No stage checkpoint found for resume_from_stage={self.resume_from_stage}, starting from scratch")
 
         for epoch in range(start_epoch, self.total_epochs + 1):
             epoch_start = time.time()
@@ -666,8 +689,8 @@ class Trainer:
                 # Save stage checkpoint at boundary (end of previous stage)
                 if self.save_stage_ckpts and epoch > 1:
                     self._save_stage_checkpoint(stage - 1, epoch - 1)
-                print()
-                print(_box_title(f"Stage {stage}: {STAGE_NAMES[stage]}"))
+                logger.info("=" * 60)
+                logger.info(f"  Stage {stage}: {STAGE_NAMES[stage]}")
                 if stage == 3:
                     self.optimizer = Adam(self.model.parameters(), lr=4e-6)
 
@@ -771,19 +794,23 @@ class Trainer:
             line += f"  ||  WER {wer:6.2f}%{marker}"
 
         line += f"  ({_fmt_time(epoch_time)})"
-        print(line)
+
+        if improved:
+            logger.success(line)
+        else:
+            logger.info(line)
 
     def _print_final_summary(self, total_time: float):
-        print()
-        print(_box_title("Training complete"))
-        print(f"  total time      : {_fmt_time(total_time)}")
+        logger.info("=" * 60)
+        logger.success("Training complete")
+        logger.info(f"  total time      : {_fmt_time(total_time)}")
         if self.best_epoch is not None:
-            print(f"  best WER        : {self.best_wer:.2f}%  (epoch {self.best_epoch})")
+            logger.success(f"  best WER        : {self.best_wer:.2f}%  (epoch {self.best_epoch})")
         else:
-            print("  best WER        : (no evaluation ran)")
+            logger.info("  best WER        : (no evaluation ran)")
         n_params = sum(p.numel() for p in self.raw_model.parameters())
         n_trainable = sum(p.numel() for p in self.raw_model.parameters() if p.requires_grad)
-        print(f"  model params    : {n_params:,} total  |  {n_trainable:,} trainable  |  "
+        logger.info(f"  model params    : {n_params:,} total  |  {n_trainable:,} trainable  |  "
               f"{n_params - n_trainable:,} frozen")
 
         # Cache statistics
@@ -793,13 +820,13 @@ class Trainer:
             train_label = "train"
             val_ds = self.val_loader.dataset
             val_stats = val_ds.cache_stats() if hasattr(val_ds, "cache_stats") else None
-            print(f"  frame cache     : {train_label} {stats['hits']}/{stats['total']} hits "
-                  f"({stats['hit_rate']:.0%})", end="")
+            cache_msg = (f"  frame cache     : {train_label} {stats['hits']}/{stats['total']} hits "
+                        f"({stats['hit_rate']:.0%})")
             if val_stats:
-                print(f"  |  dev {val_stats['hits']}/{val_stats['total']} hits "
-                      f"({val_stats['hit_rate']:.0%})", end="")
-            print()
-        print(_hr("="))
+                cache_msg += (f"  |  dev {val_stats['hits']}/{val_stats['total']} hits "
+                             f"({val_stats['hit_rate']:.0%})")
+            logger.info(cache_msg)
+        logger.info("=" * 60)
 
     # ------------------------------------------------------------------
     # Checkpointing
@@ -808,13 +835,13 @@ class Trainer:
     def _save_checkpoint(self, epoch: int, wer: float):
         path = os.path.join(self.ckpt_dir, f"smkd_best_ep{epoch}_wer{wer:.2f}.pt")
         self._write_checkpoint(path, epoch, wer)
-        print(f"           >> checkpoint saved: {os.path.basename(path)}")
+        logger.success(f"Checkpoint saved: {os.path.basename(path)}")
 
     def _save_stage_checkpoint(self, stage: int, epoch: int):
         """Save a checkpoint at the end of a training stage for later resume."""
         path = os.path.join(self.ckpt_dir, f"smkd_stage{stage}_ep{epoch}.pt")
         self._write_checkpoint(path, epoch, None)
-        print(f"           >> stage {stage} checkpoint saved: {os.path.basename(path)}")
+        logger.success(f"Stage {stage} checkpoint saved: {os.path.basename(path)}")
 
     def _write_checkpoint(self, path: str, epoch: int, wer):
         ckpt = {
@@ -833,7 +860,7 @@ class Trainer:
 
     def _load_stage_checkpoint(self, ckpt_path: str):
         """Resume training from a previously saved stage checkpoint."""
-        print(f"\n  [*] Resuming from stage checkpoint: {ckpt_path}")
+        logger.info(f"Resuming from stage checkpoint: {ckpt_path}")
         ckpt = torch.load(ckpt_path, map_location=self.device)
         self.raw_model.load_state_dict(ckpt["model"])
         self.raw_model.set_stage(ckpt.get("stage", self.raw_model.stage))
@@ -847,8 +874,8 @@ class Trainer:
 
         resume_epoch = ckpt["epoch"]
         resume_wer = ckpt.get("wer")
-        print(f"  [*] Resumed at epoch {resume_epoch}, stage {self.raw_model.stage}"
-              + (f", WER={resume_wer:.2f}%" if resume_wer else ""))
+        logger.info(f"Resumed at epoch {resume_epoch}, stage {self.raw_model.stage}"
+                   + (f", WER={resume_wer:.2f}%" if resume_wer else ""))
         return resume_epoch
 
     def _print_timing_breakdown(self, epoch: int):
@@ -860,12 +887,12 @@ class Trainer:
         def pct(key):
             return 100.0 * self.step_timers[key] / total
 
-        print(f"  ⏱  timing epoch {epoch:3d}: "
-              f"data={self.step_timers['data_xfer']:5.1f}s ({pct('data_xfer'):4.1f}%)  "
-              f"fwd={self.step_timers['forward']:5.1f}s ({pct('forward'):4.1f}%)  "
-              f"gsba={self.step_timers['gsba']:5.1f}s ({pct('gsba'):4.1f}%)  "
-              f"loss={self.step_timers['loss']:5.1f}s ({pct('loss'):4.1f}%)  "
-              f"bwd={self.step_timers['backward']:5.1f}s ({pct('backward'):4.1f}%)")
+        logger.debug(f"timing epoch {epoch:3d}: "
+                    f"data={self.step_timers['data_xfer']:5.1f}s ({pct('data_xfer'):4.1f}%)  "
+                    f"fwd={self.step_timers['forward']:5.1f}s ({pct('forward'):4.1f}%)  "
+                    f"gsba={self.step_timers['gsba']:5.1f}s ({pct('gsba'):4.1f}%)  "
+                    f"loss={self.step_timers['loss']:5.1f}s ({pct('loss'):4.1f}%)  "
+                    f"bwd={self.step_timers['backward']:5.1f}s ({pct('backward'):4.1f}%)")
 
     # ------------------------------------------------------------------
     # Plotting
@@ -932,7 +959,7 @@ class Trainer:
 
         if save_path:
             fig.savefig(save_path, dpi=120, bbox_inches="tight")
-            print(f"Saved plot to {save_path}")
+            logger.info(f"Saved plot to {save_path}")
         if show:
             plt.show()
 

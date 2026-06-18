@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision.models import resnet18, mobilenet_v3_small, efficientnet_b0
+from loguru import logger
 
 
 # ---------------------------------------------------------------------------
@@ -221,7 +222,9 @@ class VisualModule(nn.Module):
             all_feats = torch.cat([main_feat] + ms_feats, dim=1)  # (B, d_model*n_branches, T')
             lvf_t = self.ms_fusion(all_feats)                      # (B, d_model, T')
         else:
-            # temporal_cnn already maps bb_dim → d_model via its first Conv1d
+            if not isinstance(self.backbone_adapter, nn.Identity):
+                # Adapter exists: project bb_dim → d_model before temporal CNN
+                feat_t = self.backbone_adapter(feat_t.permute(0, 2, 1)).permute(0, 2, 1)
             lvf_t = self.temporal_cnn(feat_t)          # (B, d_model, T')
 
         lvf = lvf_t.permute(0, 2, 1)                   # (B, T', d_model)
@@ -363,8 +366,13 @@ class SMKD(nn.Module):
         Returns:
             dict with keys: 'logits_v', 'logits_g', 'lvf', 'gcf'
         """
+        logger.debug(f"SMKD.forward input: {x.shape}")
+
         lvf = self.visual_module(x)           # (B, T', d)
+        logger.debug(f"  lvf after VisualModule: {lvf.shape}")
+
         gcf = self.contextual_module(lvf)     # (B, T', d)
+        logger.debug(f"  gcf after ContextualModule: {gcf.shape}")
 
         if self.stage in (1, 2):
             logits_v = self.shared_classifier(lvf)   # (B, T', C+1)
@@ -374,6 +382,7 @@ class SMKD(nn.Module):
             logits_v = self.visual_classifier(lvf)
             logits_g = self.contextual_classifier(gcf)
 
+        logger.debug(f"  logits_v: {logits_v.shape}, logits_g: {logits_g.shape}")
         return {
             "logits_v": logits_v,
             "logits_g": logits_g,

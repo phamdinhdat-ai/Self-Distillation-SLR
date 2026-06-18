@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
+from loguru import logger
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -715,10 +716,10 @@ def main():
     n_total = len(configs)
     print()
     print("=" * 72)
-    print(f"  SMKD Experiment Benchmark — {n_total} configs")
-    print(f"  Output root: {args.output_dir}")
-    print(f"  Epochs override: {args.epochs if args.epochs else 'use config default (100)'}")
-    print(f"  Data: synthetic only")
+    logger.info(f"SMKD Experiment Benchmark — {n_total} configs")
+    logger.info(f"Output root: {args.output_dir}")
+    logger.info(f"Epochs override: {args.epochs if args.epochs else 'use config default (100)'}")
+    logger.info(f"Data: synthetic only")
     print("=" * 72)
 
     # Print config list
@@ -726,7 +727,7 @@ def main():
     print("  Experiments to run:")
     for i, (name, path) in enumerate(configs):
         desc = EXPERIMENT_DESCRIPTIONS.get(name, name)
-        print(f"    [{i+1:2d}/{n_total}] {name:<28s} — {desc}")
+        logger.info(f"  [{i+1:2d}/{n_total}] {name:<28s} — {desc}")
     print()
 
     # ---- Run all experiments ----
@@ -740,9 +741,9 @@ def main():
         desc = EXPERIMENT_DESCRIPTIONS.get(name, name)
 
         print("-" * 72)
-        print(f"  {progress} {name} — {desc}")
-        print(f"  Config: {config_path}")
-        print(f"  Start:  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(f"{progress} {name} — {desc}")
+        logger.info(f"Config: {config_path}")
+        logger.info(f"Start:  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print("-" * 72)
 
         run_start = time.time()
@@ -761,7 +762,7 @@ def main():
                         has_existing = True
                         break
                 if has_existing:
-                    print(f"  ⏭  Skipping (existing run found under {exp_output_dir})")
+                    logger.info(f"⏭  Skipping (existing run found under {exp_output_dir})")
                     continue
 
         result = run_single_experiment(
@@ -779,33 +780,36 @@ def main():
             success_count += 1
             best_wer = result.get("best_wer")
             best_wer_str = f"{best_wer:.2f}%" if best_wer and best_wer < float("inf") else "--"
-            print(f"  ✓  Completed in {fmt_seconds(run_time)}  |  "
-                  f"Best WER: {best_wer_str}  |  "
-                  f"Run dir: {result.get('run_dir', 'N/A')}")
+            logger.success(f"Completed in {fmt_seconds(run_time)}  |  "
+                          f"Best WER: {best_wer_str}  |  "
+                          f"Run dir: {result.get('run_dir', 'N/A')}")
         else:
             fail_count += 1
             error_msg = result.get("error", "Unknown error")
             # Print only first 2 lines of error
             error_short = "\n".join(error_msg.split("\n")[:2])
-            print(f"  ✗  FAILED after {fmt_seconds(run_time)}")
-            print(f"     Error: {error_short}")
+            logger.error(f"FAILED after {fmt_seconds(run_time)}")
+            logger.error(f"Error: {error_short}")
 
         # Progress estimate
         elapsed_total = time.time() - benchmark_start
         avg_per_run = elapsed_total / (i + 1)
         remaining = avg_per_run * (n_total - i - 1)
-        print(f"  ⏱  Elapsed: {fmt_seconds(elapsed_total)}  |  "
-              f"Est. remaining: {fmt_seconds(remaining)}  |  "
-              f"Success: {success_count}/{i+1}")
+        logger.info(f"Elapsed: {fmt_seconds(elapsed_total)}  |  "
+                   f"Est. remaining: {fmt_seconds(remaining)}  |  "
+                   f"Success: {success_count}/{i+1}")
 
     # ---- Final report ----
     total_benchmark_time = time.time() - benchmark_start
     print()
     print("=" * 72)
-    print(f"  BENCHMARK COMPLETE")
-    print(f"  Total time: {fmt_seconds(total_benchmark_time)}")
-    print(f"  Successful: {success_count}/{n_total}")
-    print(f"  Failed:     {fail_count}/{n_total}")
+    logger.success(f"BENCHMARK COMPLETE")
+    logger.info(f"Total time: {fmt_seconds(total_benchmark_time)}")
+    logger.info(f"Successful: {success_count}/{n_total}")
+    if fail_count > 0:
+        logger.warning(f"Failed:     {fail_count}/{n_total}")
+    else:
+        logger.info(f"Failed:     {fail_count}/{n_total}")
     print("=" * 72)
 
     # Print summary table

@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 import yaml
+from loguru import logger
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -167,7 +168,7 @@ def override_config(flat: Dict[str, Any], overrides: list) -> Dict[str, Any]:
                         pass  # keep as string
             flat[key] = value
         except ValueError:
-            print(f"  [!] Invalid override: '{ov}' (expected key=value)")
+            logger.warning(f"Invalid override: '{ov}' (expected key=value)")
     return flat
 
 
@@ -224,7 +225,7 @@ def main():
     args = parse_args()
 
     # Load config
-    print(f"Loading config: {args.config}")
+    logger.info(f"Loading config: {args.config}")
     if not os.path.exists(args.config):
         # Try relative to configs/
         alt = os.path.join("configs", args.config)
@@ -264,12 +265,12 @@ def main():
     with open(os.path.join(run_dir, "flat_config.yaml"), "w") as f:
         yaml.dump(config, f, default_flow_style=False)
 
-    print(f"Run directory: {run_dir}")
-    print(f"Experiment: {config['experiment_name']}")
-    print(f"Config summary:")
+    logger.info(f"Run directory: {run_dir}")
+    logger.info(f"Experiment: {config['experiment_name']}")
+    logger.debug("Config summary:")
     for k, v in sorted(config.items()):
         if not k.startswith("_"):
-            print(f"  {k}: {v}")
+            logger.debug(f"  {k}: {v}")
 
     # Run training
     trainer = Trainer(config)
@@ -278,20 +279,20 @@ def main():
     # Save history CSV
     history_path = os.path.join(run_dir, "history.csv")
     save_history_csv(trainer.history, history_path)
-    print(f"History saved to: {history_path}")
+    logger.info(f"History saved to: {history_path}")
 
     # Save WER/loss plot
     plot_path = os.path.join(run_dir, "wer_history.png")
     trainer.plot_history(save_path=plot_path, show=False)
-    print(f"Plot saved to: {plot_path}")
+    logger.info(f"Plot saved to: {plot_path}")
 
     # Print final summary
     print()
     print("=" * 70)
-    print(f"  Experiment complete: {config['experiment_name']}")
-    print(f"  Run directory: {run_dir}")
+    logger.success(f"Experiment complete: {config['experiment_name']}")
+    logger.info(f"Run directory: {run_dir}")
     if trainer.best_epoch is not None:
-        print(f"  Best WER: {trainer.best_wer:.2f}% @ epoch {trainer.best_epoch}")
+        logger.success(f"Best WER: {trainer.best_wer:.2f}% @ epoch {trainer.best_epoch}")
     print("=" * 70)
 
     return run_dir
