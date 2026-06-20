@@ -73,6 +73,7 @@ def flatten_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     model = cfg.get("model", {})
     flat["d_model"] = model.get("d_model", 512)
     flat["hidden_size"] = model.get("hidden_size", 512)
+    flat["context_type"] = model.get("context_type", "bilstm")
     flat["backbone"] = model.get("backbone", "resnet18")
     flat["pretrained_backbone"] = model.get("pretrained_backbone", False)
     flat["freeze_backbone"] = model.get("freeze_backbone", False)

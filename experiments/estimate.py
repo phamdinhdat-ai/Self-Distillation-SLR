@@ -415,6 +415,18 @@ EXPERIMENTS = [
         "extra_overhead": 1.02,
     },
     {
+        "name": "model_transformer",
+        "config": "model_transformer.yaml",
+        "category": "model",
+        "backbone": "resnet18",
+        "conv_type": "standard",
+        "multi_scale": False,
+        "use_amp": False,
+        "use_ema": False,
+        "freeze_backbone": False,
+        "extra_overhead": 0.80,    # Transformer ~20% faster than BiLSTM (parallel)
+    },
+    {
         "name": "model_pretrained",
         "config": "model_pretrained.yaml",
         "category": "model",

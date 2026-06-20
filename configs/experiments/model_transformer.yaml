@@ -1,0 +1,16 @@
+# =============================================================================
+# Lightweight Transformer replaces BiLSTM
+# 2-layer Transformer encoder (4 heads, FFN×2, Pre-LN) with sinusoidal pos encoding
+# ~10.3M params (vs 10.5M BiLSTM) — better GPU parallelism, captures global context
+# =============================================================================
+data:
+  synthetic: true
+  batch_size: 2
+model:
+  backbone: "resnet18"
+  pretrained_backbone: true
+  context_type: "transformer"
+schedule:
+  epochs: 100
+output:
+  experiment_name: "model_transformer"
