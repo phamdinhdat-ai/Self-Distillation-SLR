@@ -1,0 +1,15 @@
+# =============================================================================
+# EfficientNet-B0 backbone (from scratch)
+# 21.3M params — stronger than ResNet-18 but needs more data
+# =============================================================================
+data:
+  synthetic: true
+  batch_size: 2
+model:
+  backbone: "efficientnet_b0"
+  pretrained_backbone: false
+  freeze_backbone: false
+schedule:
+  epochs: 100
+output:
+  experiment_name: "model_efficientnet"

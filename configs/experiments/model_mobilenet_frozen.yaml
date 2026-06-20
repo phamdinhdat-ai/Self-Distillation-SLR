@@ -1,0 +1,16 @@
+# =============================================================================
+# MobileNetV3-Small pretrained + FROZEN
+# Lightweight feature extraction — only temporal CNN + BiLSTM train
+# ~5.5M trainable params, ~10 min/epoch on T4
+# =============================================================================
+data:
+  synthetic: true
+  batch_size: 2
+model:
+  backbone: "mobilenet_v3_small"
+  pretrained_backbone: true
+  freeze_backbone: true
+schedule:
+  epochs: 100
+output:
+  experiment_name: "model_mobilenet_frozen"

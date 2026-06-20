@@ -1,0 +1,15 @@
+# =============================================================================
+# MobileNetV3-Small + ImageNet pretrained
+# Lightweight backbone with transfer learning
+# =============================================================================
+data:
+  synthetic: true
+  batch_size: 2
+model:
+  backbone: "mobilenet_v3_small"
+  pretrained_backbone: true
+  freeze_backbone: false
+schedule:
+  epochs: 100
+output:
+  experiment_name: "model_mobilenet_pretrained"

@@ -1,0 +1,15 @@
+# =============================================================================
+# EfficientNet-B0 + ImageNet pretrained
+# Pretrained weights give strong features; full fine-tuning
+# =============================================================================
+data:
+  synthetic: true
+  batch_size: 2
+model:
+  backbone: "efficientnet_b0"
+  pretrained_backbone: true
+  freeze_backbone: false
+schedule:
+  epochs: 100
+output:
+  experiment_name: "model_efficientnet_pretrained"

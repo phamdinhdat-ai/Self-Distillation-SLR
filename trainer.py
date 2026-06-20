@@ -169,6 +169,7 @@ class Trainer:
             use_tsm=cfg.get("use_tsm", False),
             pretrained_backbone=cfg.get("pretrained_backbone", False),
             freeze_backbone=cfg.get("freeze_backbone", False),
+            context_type=cfg.get("context_type", "bilstm"),
         ).to(self.device)
 
         if self.use_data_parallel:
