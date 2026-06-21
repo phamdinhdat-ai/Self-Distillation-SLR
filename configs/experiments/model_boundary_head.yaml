@@ -1,0 +1,26 @@
+# =============================================================================
+# Gloss Boundary Detector Head
+# Adds a lightweight binary classifier on LVF predicting gloss onset/offset
+# from GSBA segment boundaries. Gives the visual module a structured
+# frame-level objective independent of CTC's weak gradient.
+# =============================================================================
+data:
+  synthetic: true
+  batch_size: 2
+model:
+  use_boundary_head: true
+loss:
+  feature_alignment:
+    enabled: true
+    weight: 0.1
+    mode: "cosine"
+  entropy_regularization:
+    enabled: true
+    weight: 0.01
+  boundary:
+    enabled: true
+    weight: 0.1
+schedule:
+  epochs: 100
+output:
+  experiment_name: "model_boundary_head"

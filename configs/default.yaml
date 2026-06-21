@@ -21,7 +21,7 @@ data:
 model:
   d_model: 512
   hidden_size: 512
-  context_type: "bilstm"       # bilstm | transformer
+  context_type: "bilstm"       # bilstm | transformer | conformer
   backbone: "resnet18"         # one of: resnet18, mobilenet_v3_small, efficientnet_b0
   pretrained_backbone: true    # load ImageNet pretrained weights
   freeze_backbone: false       # freeze backbone (feature extraction mode)
@@ -29,6 +29,7 @@ model:
   multi_scale_temporal: false
   multi_scale_dilation_rates: [1, 2]
   use_tsm: false               # temporal shift module (ResNet-18 only)
+  use_boundary_head: false     # gloss boundary detector head on visual module
 
 # ---- Loss ----
 loss:
@@ -59,6 +60,22 @@ loss:
   # Confidence-weighted GSBA
   gsba_confidence_weight: false
 
+  # Gloss prototype contrastive loss (inter-class separation)
+  proto_contrastive:
+    enabled: false
+    weight: 0.01              # coefficient for prototype repulsion
+    margin: 0.3               # cosine-sim margin threshold
+
+  # Temporal variance spike penalty
+  spike_penalty:
+    enabled: false
+    weight: 0.01              # coefficient for variance penalty
+
+  # Boundary loss (on visual module boundary detector head)
+  boundary:
+    enabled: false
+    weight: 0.1               # coefficient for boundary CE loss
+
 # ---- Training schedule ----
 schedule:
   epochs: 100
@@ -78,6 +95,13 @@ schedule:
     kd_temperature: 4.0
     kd_weight: 0.5
 
+  # Adaptive stage transitions (WER-convergence based)
+  adaptive_stages: false
+  adaptive_window: 5           # number of evals to check convergence
+  adaptive_threshold: 0.5      # max WER % improvement over window
+  adaptive_min_stage1: 10      # minimum epochs before leaving stage 1
+  adaptive_min_stage2: 25      # minimum epochs before leaving stage 2
+
 # ---- Optimization ----
 optimization:
   lr: 0.0001
@@ -92,6 +116,9 @@ optimization:
   # EMA (exponential moving average)
   use_ema: false
   ema_decay: 0.999
+
+  # Layer-wise learning rate scaling
+  layerwise_lr: false           # backbone 0.1×, temporal 1.0×, boundary 1.5×
 
 # ---- Hardware ----
 hardware:

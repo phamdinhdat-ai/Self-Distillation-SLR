@@ -1,0 +1,26 @@
+# =============================================================================
+# Convergence-Adaptive Stage Transitions
+# Replaces fixed epoch cutoffs (30/90) with WER-convergence criterion.
+# If dev WER improvement < 0.5% over 5 evals -> advance stage.
+# Critical for small datasets where convergence is faster than on full PHOENIX14.
+# =============================================================================
+data:
+  synthetic: true
+  batch_size: 2
+loss:
+  feature_alignment:
+    enabled: true
+    weight: 0.1
+    mode: "cosine"
+  entropy_regularization:
+    enabled: true
+    weight: 0.01
+schedule:
+  epochs: 100
+  adaptive_stages: true
+  adaptive_window: 5
+  adaptive_threshold: 0.5
+  adaptive_min_stage1: 10
+  adaptive_min_stage2: 25
+output:
+  experiment_name: "train_adaptive_stages"

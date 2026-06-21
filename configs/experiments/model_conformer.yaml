@@ -1,0 +1,25 @@
+# =============================================================================
+# Full Conformer Contextual Module
+# Replaces BiLSTM/Transformer with convolution-augmented Conformer blocks.
+# Combines local temporal modelling (depthwise conv) with global context
+# (self-attention). Fully parallelisable across T for 3-4x GPU throughput.
+# =============================================================================
+data:
+  synthetic: true
+  batch_size: 2
+model:
+  backbone: "resnet18"
+  pretrained_backbone: true
+  context_type: "conformer"
+loss:
+  feature_alignment:
+    enabled: true
+    weight: 0.1
+    mode: "cosine"
+  entropy_regularization:
+    enabled: true
+    weight: 0.01
+schedule:
+  epochs: 100
+output:
+  experiment_name: "model_conformer"

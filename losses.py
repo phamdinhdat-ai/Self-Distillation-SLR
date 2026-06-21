@@ -239,6 +239,13 @@ class SMKDLoss(nn.Module):
         focal_ctc_enabled: bool = False,
         focal_ctc_gamma: float = 2.0,
         gsba_confidence_weight: bool = False,
+        # Gloss prototype contrastive
+        proto_contrastive_enabled: bool = False,
+        proto_contrastive_weight: float = 0.01,
+        proto_contrastive_margin: float = 0.3,
+        # Temporal variance spike penalty
+        spike_penalty_enabled: bool = False,
+        spike_penalty_weight: float = 0.01,
         # Self-distillation
         self_distill_enabled: bool = False,
         kd_temperature: float = 4.0,
@@ -264,6 +271,11 @@ class SMKDLoss(nn.Module):
         self.entropy_enabled = entropy_reg_enabled
         self.entropy_weight = entropy_reg_weight
         self.confidence_weight = gsba_confidence_weight
+        self.proto_contrastive = proto_contrastive_enabled
+        self.proto_weight = proto_contrastive_weight
+        self.proto_margin = proto_contrastive_margin
+        self.spike_enabled = spike_penalty_enabled
+        self.spike_weight = spike_penalty_weight
         self.self_distill = self_distill_enabled
         self.kd_temp = kd_temperature
         self.kd_weight = kd_weight
@@ -342,6 +354,26 @@ class SMKDLoss(nn.Module):
             l_entropy = -h_blank
             losses["entropy"] = l_entropy.item()
             total = total + self.entropy_weight * l_entropy
+
+        # ---- Optional: Gloss prototype contrastive loss ----
+        if self.proto_contrastive and stage in (1, 2):
+            # Only on shared classifier (stages 1 & 2)
+            # We expect the caller to pass the shared classifier weight
+            # via a new parameter; for now we use a class attribute that
+            # the trainer sets at the start of each forward call
+            if hasattr(self, '_proto_weight_matrix') and self._proto_weight_matrix is not None:
+                l_proto = prototype_contrastive_loss(
+                    self._proto_weight_matrix, blank=self.blank, margin=self.proto_margin,
+                )
+                losses["proto"] = l_proto.item()
+                total = total + self.proto_weight * l_proto
+
+        # ---- Optional: Temporal variance spike penalty ----
+        if self.spike_enabled:
+            # Penalise high temporal variance of blank posterior
+            l_spike = blank_variance_penalty(logits_g, blank=self.blank)
+            losses["spike"] = l_spike.item()
+            total = total + self.spike_weight * l_spike
 
         # ---- Optional: Self-distillation KD loss ----
         if self.self_distill and teacher_logits_g is not None:
@@ -451,6 +483,90 @@ def feature_alignment_loss(
         return (1.0 - sim).mean()
     else:  # l2
         return F.mse_loss(lvf_m, gcf_m)  # MSE = ||diff||^2 / d
+
+
+# ---------------------------------------------------------------------------
+# Gloss Prototype Contrastive Loss – pushes different gloss prototypes apart
+# ---------------------------------------------------------------------------
+
+def prototype_contrastive_loss(
+    classifier_weight: torch.Tensor,  # (C+1, d) – normalised weight matrix
+    blank: int = 0,
+    margin: float = 0.3,
+) -> torch.Tensor:
+    """
+    Penalise gloss prototypes that are too similar to each other.
+
+    The shared classifier weights W = {w_c} serve as class prototypes
+    (paper Section 3.2). CTC + weight sharing clusters features around
+    their prototype but never pushes different prototypes apart.
+    This loss directly optimises the inter-class margin.
+
+    L_proto = (1 / N_pairs) * Σ_{c≠c'} ReLU(cos(w_c, w_{c'}) - margin)
+
+    The blank token is excluded from repulsion.
+
+    Args:
+        classifier_weight: (C+1, d) already L2-normalised weight matrix
+        blank: index of the CTC blank token (excluded from penalty)
+        margin: cosine-similarity margin below which no penalty is applied
+    Returns:
+        scalar loss
+    """
+    C1, d = classifier_weight.shape
+    w = F.normalize(classifier_weight, p=2, dim=-1)  # ensure normalised
+
+    # Exclude blank from the set of gloss prototypes
+    mask = torch.ones(C1, dtype=torch.bool, device=w.device)
+    mask[blank] = False
+    w_gloss = w[mask]  # (C, d)
+    C = w_gloss.size(0)
+
+    if C < 2:
+        return w.new_tensor(0.0)
+
+    # Pairwise cosine similarities: (C, C)
+    cos_sim = w_gloss @ w_gloss.t()  # (C, C)
+
+    # Zero out the diagonal (self-similarity = 1 is not penalised)
+    diag_mask = ~torch.eye(C, dtype=torch.bool, device=w.device)
+    off_diag = cos_sim[diag_mask]  # (C*(C-1),)
+
+    # Penalise only pairs with cos-sim > margin
+    penalty = F.relu(off_diag - margin)
+    return penalty.mean()
+
+
+# ---------------------------------------------------------------------------
+# Temporal Variance Spike Penalty – targets the spike shape directly
+# ---------------------------------------------------------------------------
+
+def blank_variance_penalty(
+    logits: torch.Tensor,  # (B, T', C+1)
+    blank: int = 0,
+) -> torch.Tensor:
+    """
+    Penalise high temporal variance of the blank-class posterior.
+
+    The spike phenomenon (paper Section 3.4) manifests as p_blank
+    oscillating between ~0 and ~1 across adjacent frames. Entropy
+    regularisation penalises per-frame overconfidence but NOT the
+    temporal oscillation pattern. This penalty targets the spike
+    shape directly by penalising the variance of p_blank over time.
+
+    L_spike = mean_b( var_t( p_blank(b, t) ) )
+
+    Args:
+        logits: (B, T', C+1) unnormalised logits
+        blank: CTC blank index
+    Returns:
+        scalar penalty (lower = fewer temporal spikes)
+    """
+    probs = F.softmax(logits, dim=-1)                # (B, T', C+1)
+    p_blank = probs[..., blank]                       # (B, T')
+    # Variance along the time axis
+    var_t = p_blank.var(dim=1)                        # (B,)
+    return var_t.mean()
 
 
 # ---------------------------------------------------------------------------

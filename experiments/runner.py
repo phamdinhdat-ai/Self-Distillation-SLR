@@ -81,6 +81,7 @@ def flatten_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     flat["multi_scale_temporal"] = model.get("multi_scale_temporal", False)
     flat["multi_scale_dilation_rates"] = model.get("multi_scale_dilation_rates", [1, 2])
     flat["use_tsm"] = model.get("use_tsm", False)
+    flat["use_boundary_head"] = model.get("use_boundary_head", False)
 
     # Loss
     loss = cfg.get("loss", {})
@@ -105,6 +106,19 @@ def flatten_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
     flat["gsba_confidence_weight"] = loss.get("gsba_confidence_weight", False)
 
+    pc = loss.get("proto_contrastive", {})
+    flat["proto_contrastive_enabled"] = pc.get("enabled", False)
+    flat["proto_contrastive_weight"] = pc.get("weight", 0.01)
+    flat["proto_contrastive_margin"] = pc.get("margin", 0.3)
+
+    sp = loss.get("spike_penalty", {})
+    flat["spike_penalty_enabled"] = sp.get("enabled", False)
+    flat["spike_penalty_weight"] = sp.get("weight", 0.01)
+
+    bd = loss.get("boundary", {})
+    flat["boundary_enabled"] = bd.get("enabled", False)
+    flat["boundary_weight"] = bd.get("weight", 0.1)
+
     # Schedule
     sched = cfg.get("schedule", {})
     flat["epochs"] = sched.get("epochs", 100)
@@ -114,6 +128,11 @@ def flatten_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     flat["gsba_update_every"] = sched.get("gsba_update_every", 10)
     flat["smooth_transitions"] = sched.get("smooth_transitions", False)
     flat["smooth_transition_epochs"] = sched.get("smooth_transition_epochs", 5)
+    flat["adaptive_stages"] = sched.get("adaptive_stages", False)
+    flat["adaptive_window"] = sched.get("adaptive_window", 5)
+    flat["adaptive_threshold"] = sched.get("adaptive_threshold", 0.5)
+    flat["adaptive_min_stage1"] = sched.get("adaptive_min_stage1", 10)
+    flat["adaptive_min_stage2"] = sched.get("adaptive_min_stage2", 25)
 
     sd = sched.get("self_distill", {})
     flat["self_distill_enabled"] = sd.get("enabled", False)
@@ -130,6 +149,7 @@ def flatten_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     flat["grad_accum_steps"] = opt.get("grad_accum_steps", 1)
     flat["use_ema"] = opt.get("use_ema", False)
     flat["ema_decay"] = opt.get("ema_decay", 0.999)
+    flat["layerwise_lr"] = opt.get("layerwise_lr", False)
 
     # Hardware
     hw = cfg.get("hardware", {})

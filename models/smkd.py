@@ -109,6 +109,40 @@ class TemporalShift(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# Gloss Boundary Detector – auxiliary head on LVF
+# ---------------------------------------------------------------------------
+
+class GlossBoundaryDetector(nn.Module):
+    """
+    Lightweight binary classification head that predicts per-frame gloss
+    onset/offset labels derived from GSBA segment boundaries.
+
+    Gives the visual module a structured frame-level objective independent
+    of CTC's weak gradient signal.  Only active during stage 2.
+
+    label[t] = 1 if frame t is the first frame of a new GSBA gloss segment
+    """
+
+    def __init__(self, d_model: int, hidden_ratio: int = 4, dropout: float = 0.1):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(d_model, d_model // hidden_ratio),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(d_model // hidden_ratio, 2),  # binary: boundary / non-boundary
+        )
+
+    def forward(self, lvf: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            lvf: (B, T', d_model)
+        Returns:
+            boundary_logits: (B, T', 2)
+        """
+        return self.net(lvf)
+
+
+# ---------------------------------------------------------------------------
 # Visual Module: 2D-backbone + 1D-CNN  (enhanced)
 # ---------------------------------------------------------------------------
 
@@ -118,7 +152,7 @@ class VisualModule(nn.Module):
 
     Architecture: 2D backbone (frame-wise) + 1D-CNN (temporal).
     Supports: backbone selection, depthwise-separable convs, multi-scale temporal
-    branches, and TSM.
+    branches, TSM, and optional gloss boundary detector head.
     """
 
     def __init__(
@@ -131,6 +165,7 @@ class VisualModule(nn.Module):
         use_tsm: bool = False,
         pretrained_backbone: bool = False,
         freeze_backbone: bool = False,
+        use_boundary_head: bool = False,
     ):
         super().__init__()
 
@@ -189,12 +224,18 @@ class VisualModule(nn.Module):
                 nn.ReLU(inplace=True),
             )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Optional gloss boundary detector (only active in stage 2)
+        self.use_boundary_head = use_boundary_head
+        self.boundary_head = GlossBoundaryDetector(d_model) if use_boundary_head else None
+
+    def forward(self, x: torch.Tensor, return_boundary: bool = False):
         """
         Args:
             x: (B, T, C, H, W)  – batch of video clips
+            return_boundary: if True and boundary head is enabled, also return boundary_logits
         Returns:
             lvf: (B, T', d_model)  – Local Visual Features
+            (optionally) boundary_logits: (B, T', 2)
         """
         B, T, C, H, W = x.shape
         x_flat = x.view(B * T, C, H, W)
@@ -223,7 +264,52 @@ class VisualModule(nn.Module):
             lvf_t = self.temporal_cnn(feat_t)          # (B, d_model, T')
 
         lvf = lvf_t.permute(0, 2, 1)                   # (B, T', d_model)
+
+        if return_boundary and self.use_boundary_head and self.boundary_head is not None:
+            boundary_logits = self.boundary_head(lvf)   # (B, T', 2)
+            return lvf, boundary_logits
+
         return lvf
+
+
+# ---------------------------------------------------------------------------
+# Conformer Convolution Module
+# ---------------------------------------------------------------------------
+
+class ConformerConvModule(nn.Module):
+    """
+    Depthwise-separable convolution with gating (GLU) and batch norm.
+    Sandwiched between the two FFN halves in a Conformer block.
+    """
+
+    def __init__(self, d_model: int, kernel_size: int = 31, dropout: float = 0.1):
+        super().__init__()
+        self.layer_norm = nn.LayerNorm(d_model)
+        self.pointwise1 = nn.Conv1d(d_model, 2 * d_model, kernel_size=1)
+        self.glu = nn.GLU(dim=1)
+        padding = kernel_size // 2
+        self.depthwise = nn.Conv1d(
+            d_model, d_model, kernel_size=kernel_size,
+            padding=padding, groups=d_model,
+        )
+        self.batch_norm = nn.BatchNorm1d(d_model)
+        self.activation = nn.SiLU()
+        self.pointwise2 = nn.Conv1d(d_model, d_model, kernel_size=1)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        residual = x
+        x = self.layer_norm(x)
+        x = x.permute(0, 2, 1)
+        x = self.pointwise1(x)
+        x = self.glu(x)
+        x = self.depthwise(x)
+        x = self.batch_norm(x)
+        x = self.activation(x)
+        x = self.pointwise2(x)
+        x = self.dropout(x)
+        x = x.permute(0, 2, 1)
+        return residual + x
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +395,101 @@ class TransformerContextualModule(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# Contextual Module: Full Conformer (convolution-augmented Transformer)
+# ---------------------------------------------------------------------------
+
+class ConformerContextualModule(nn.Module):
+    """
+    Encodes long-term context via Conformer blocks.
+
+    Each Conformer block = FFN(half) -> MHSA -> Conv -> FFN(half).
+    Combines local temporal modelling (depthwise conv) with global
+    context (self-attention).  Fully parallelisable across T.
+
+    Ref: Gulati et al., "Conformer: Convolution-augmented Transformer
+    for Speech Recognition", Interspeech 2020.
+    """
+
+    def __init__(
+        self,
+        d_model: int = 512,
+        num_heads: int = 4,
+        num_layers: int = 2,
+        ff_expansion: int = 2,
+        conv_kernel: int = 31,
+        dropout: float = 0.3,
+        max_len: int = 200,
+    ):
+        super().__init__()
+        self.d_model = d_model
+        self.pos_encoding = nn.Parameter(
+            torch.randn(1, max_len, d_model) * 0.02
+        )
+        self.layers = nn.ModuleList([
+            _ConformerBlock(d_model, num_heads, ff_expansion, conv_kernel, dropout)
+            for _ in range(num_layers)
+        ])
+        self.final_norm = nn.LayerNorm(d_model)
+
+    def forward(self, lvf: torch.Tensor) -> torch.Tensor:
+        T = lvf.size(1)
+        pos = self.pos_encoding[:, :T, :]
+        x = lvf + pos
+        for layer in self.layers:
+            x = layer(x)
+        return self.final_norm(x)
+
+
+class _ConformerBlock(nn.Module):
+    """Single Conformer block: FFN(half) -> MHSA -> Conv -> FFN(half)."""
+
+    def __init__(self, d_model, num_heads, ff_expansion, conv_kernel, dropout):
+        super().__init__()
+        self.ff1 = _FeedForwardModule(d_model, ff_expansion, dropout)
+        self.attn_norm = nn.LayerNorm(d_model)
+        self.attn = nn.MultiheadAttention(
+            d_model, num_heads, dropout=dropout, batch_first=True,
+        )
+        self.attn_dropout = nn.Dropout(dropout)
+        self.conv_module = ConformerConvModule(d_model, conv_kernel, dropout)
+        self.ff2 = _FeedForwardModule(d_model, ff_expansion, dropout)
+        self.final_norm = nn.LayerNorm(d_model)
+
+    def forward(self, x):
+        x = x + 0.5 * self.ff1(x)
+        residual = x
+        x = self.attn_norm(x)
+        x, _ = self.attn(x, x, x)
+        x = residual + self.attn_dropout(x)
+        x = self.conv_module(x)
+        x = x + 0.5 * self.ff2(x)
+        return self.final_norm(x)
+
+
+class _FeedForwardModule(nn.Module):
+    """Pre-LN feed-forward with SiLU activation."""
+
+    def __init__(self, d_model, ff_expansion, dropout):
+        super().__init__()
+        self.norm = nn.LayerNorm(d_model)
+        self.linear1 = nn.Linear(d_model, d_model * ff_expansion)
+        self.activation = nn.SiLU()
+        self.dropout1 = nn.Dropout(dropout)
+        self.linear2 = nn.Linear(d_model * ff_expansion, d_model)
+        self.dropout2 = nn.Dropout(dropout)
+
+    def forward(self, x):
+        residual = x
+        x = self.norm(x)
+        x = self.linear1(x)
+        x = self.activation(x)
+        x = self.dropout1(x)
+        x = self.linear2(x)
+        x = self.dropout2(x)
+        return residual + x
+
+
+# ---------------------------------------------------------------------------
 # Shared Classifier with L2-normalised weights (A-softmax style)
 # ---------------------------------------------------------------------------
 
@@ -368,7 +549,8 @@ class SMKD(nn.Module):
         use_tsm: bool = False,
         pretrained_backbone: bool = False,
         freeze_backbone: bool = False,
-        context_type: str = "bilstm",  # "bilstm" | "transformer"
+        context_type: str = "bilstm",  # "bilstm" | "transformer" | "conformer"
+        use_boundary_head: bool = False,
     ):
         super().__init__()
         self.num_classes = num_classes
@@ -383,12 +565,17 @@ class SMKD(nn.Module):
             use_tsm=use_tsm,
             pretrained_backbone=pretrained_backbone,
             freeze_backbone=freeze_backbone,
+            use_boundary_head=use_boundary_head,
         )
 
         if context_type == "transformer":
             self.contextual_module = TransformerContextualModule(
                 d_model=d_model, num_heads=4, num_layers=2,
                 ff_expansion=2, dropout=0.3)
+        elif context_type == "conformer":
+            self.contextual_module = ConformerContextualModule(
+                d_model=d_model, num_heads=4, num_layers=2,
+                ff_expansion=2, conv_kernel=31, dropout=0.3)
         else:
             self.contextual_module = ContextualModule(d_model=d_model, hidden_size=hidden_size)
 
@@ -412,6 +599,7 @@ class SMKD(nn.Module):
             x: (B, T, C, H, W)
         Returns:
             dict with keys: 'logits_v', 'logits_g', 'lvf', 'gcf'
+                   and optionally 'boundary_logits' if boundary head is enabled
         """
         lvf = self.visual_module(x)           # (B, T', d)
         gcf = self.contextual_module(lvf)     # (B, T', d)
@@ -424,12 +612,19 @@ class SMKD(nn.Module):
             logits_v = self.visual_classifier(lvf)
             logits_g = self.contextual_classifier(gcf)
 
-        return {
+        out = {
             "logits_v": logits_v,
             "logits_g": logits_g,
             "lvf": lvf,
             "gcf": gcf,
         }
+
+        # Boundary head output (only when enabled)
+        if self.visual_module.use_boundary_head and self.visual_module.boundary_head is not None:
+            boundary_logits = self.visual_module.boundary_head(lvf)  # (B, T', 2)
+            out["boundary_logits"] = boundary_logits
+
+        return out
 
     def decode(self, x: torch.Tensor) -> torch.Tensor:
         """Greedy CTC decoding using contextual module output."""

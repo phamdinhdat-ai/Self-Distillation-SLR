@@ -1,0 +1,24 @@
+# =============================================================================
+# Gloss Prototype Contrastive Loss
+# Penalises similar gloss prototypes to improve inter-class separation.
+# Paper Section 3.2: classifier weights = class prototypes
+# =============================================================================
+data:
+  synthetic: true
+  batch_size: 2
+loss:
+  feature_alignment:
+    enabled: true
+    weight: 0.1
+    mode: "cosine"
+  entropy_regularization:
+    enabled: true
+    weight: 0.01
+  proto_contrastive:
+    enabled: true
+    weight: 0.01
+    margin: 0.3
+schedule:
+  epochs: 100
+output:
+  experiment_name: "loss_proto_contrastive"

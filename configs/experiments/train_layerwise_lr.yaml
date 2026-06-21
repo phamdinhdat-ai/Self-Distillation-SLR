@@ -1,0 +1,24 @@
+# =============================================================================
+# Layer-wise Learning Rate Scaling
+# Differential LRs: backbone 0.1x (prevents catastrophic forgetting),
+# temporal CNN 1.0x, boundary head 1.5x (fast adaptation for new components).
+# =============================================================================
+data:
+  synthetic: true
+  batch_size: 2
+model:
+  pretrained_backbone: true
+loss:
+  feature_alignment:
+    enabled: true
+    weight: 0.1
+    mode: "cosine"
+  entropy_regularization:
+    enabled: true
+    weight: 0.01
+optimization:
+  layerwise_lr: true
+schedule:
+  epochs: 100
+output:
+  experiment_name: "train_layerwise_lr"

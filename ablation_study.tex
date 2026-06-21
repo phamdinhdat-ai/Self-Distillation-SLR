@@ -1,0 +1,87 @@
+\subsection{Ablation Study}
+\label{subsec:ablation}
+
+To isolate the contribution of each architectural component---particularly
+the Stage~2 graph-aware extensions (typed edge emission, neighbourhood-aware
+state, graph reward shaping, and the \merge{} operation) and the Stage~3
+dynamic linking and bidirectional evolution mechanism---Table~\ref{tab:ablation}
+evaluates four ablated \ours variants on LongMemEval, reporting EM accuracy
+by hop category alongside two knowledge-graph diagnostics: mean node degree
+$\bar{d}$ and singleton rate (\% of notes with no edges after Stage~3).
+
+\begin{table}[t]
+\centering
+\caption{Ablation study on LongMemEval (EM \%, mean over five seeds), plus
+knowledge-graph diagnostics ($\bar{d}$: mean node degree; \textbf{Sgl.}:
+singleton \%). $\Delta$ values vs.\ full \ours in parentheses. Variants:
+\textbf{NoMrg} = no \merge{} operation (Stage~2); \textbf{NoGR} = no
+graph-aware reward $R_{\mathrm{graph}}$ (Stage~2); \textbf{NoLnk} = no
+linking, Stage~3 disabled; \textbf{NoBE} = no bidirectional evolution
+(Stage~3, forward links only); \textbf{AL} = Atomic-Linking baseline (no
+RL write ops, no utility retrieval).}
+\label{tab:ablation}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{l ccc cc}
+\toprule
+\textbf{Variant} & 1-hop & 2-hop & Multi & $\bar{d}$ & Sgl. (\%) \\
+\midrule
+\ours (full)  & 65.9 & 54.3 & 44.1 & 5.82 & 3.1 \\
+NoMrg  & 67.1 (+1.2) & 55.4 (+1.1) & 43.8 (-0.3) & 4.36 & 9.7 \\
+NoGR   & 66.8 (+0.9) & 53.7 (-0.6) & 41.2 (-2.9) & 4.91 & 12.4 \\
+NoLnk  & 63.4 (-2.5) & 49.0 (-5.3) & 36.7 (-7.4) & 1.94 & 41.8 \\
+NoBE   & 67.6 (+1.7) & 54.2 (-0.1) & 42.3 (-1.8) & 5.21 & 5.6 \\
+\midrule
+AL     & 58.3 (-7.6) & 45.9 (-8.4) & 31.5 (-12.6) & 3.78 & 14.2 \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+\paragraph{The \merge{} operation has mixed effects across hop depths.}
+Removing \merge{} (NoMrg) reduces mean node degree from $5.82$ to $4.36$ and
+nearly triples the singleton rate, yet yields marginal accuracy gains on
+1-hop and 2-hop (+1.2 and +1.1 respectively) while incurring a small
+multi-hop cost ($-0.3$).
+This suggests that without consolidation, near-duplicate notes form redundant
+sub-clusters that, while noisy, occasionally surface additional relevant
+evidence for shallow queries; however, they dilute the centrality signal
+Phase~B relies on and crowd out multi-hop bridges from the
+$k$-nearest-neighbour set (Eq.~\eqref{eq:nearest_neighbours}), resulting in
+a net negative effect on more complex reasoning chains.
+
+\paragraph{Graph-aware reward shaping primarily benefits multi-hop accuracy.}
+Removing $R_{\mathrm{graph}}$ (NoGR) yields modest gains on 1-hop ($+0.9$)
+but produces a clear multi-hop drop ($-2.9$), with visible degradation in
+$\bar{d}$ and singleton rate.
+Because $R_{\mathrm{graph}}$ explicitly rewards degree gain and contradiction
+resolution (Eq.~\eqref{eq:graph_reward}), its removal causes the Memory
+Manager to revert toward optimising answer correctness alone---partially
+reproducing the flat-structure pathology of RM
+(Table~\ref{tab:main_results}) even though typed-edge emission and the
+neighbourhood-aware state (Eq.~\eqref{eq:manager_state}) remain active.
+The trade-off indicates that graph reward shaping is most critical for
+queries requiring multi-step inference, while its regularising effect on
+simpler queries is limited.
+
+\paragraph{Stage~3 linking is necessary, not merely additive.}
+Disabling Stage~3 entirely (NoLnk) collapses the knowledge graph to a
+near-empty edge set ($\bar{d}=1.94$, $41.8\%$ singletons) and yields the
+largest accuracy drop of any ablation across all hop categories ($-2.5$,
+$-5.3$, $-7.4$).
+The degradation is most pronounced on multi-hop queries, where accuracy falls
+to $36.7$---approaching AL's multi-hop score of $31.5$.
+This near-equivalence shows that the Stage~1--2 note enrichments and RL write
+operations contribute relatively little to multi-hop reasoning \emph{in the
+absence of} an explicit relational structure to traverse---the typed and
+free-form edges produced by Stage~3 are what operationalise the richer note
+schema for multi-hop retrieval.
+
+\paragraph{Bidirectional evolution contributes a small, hop-dependent gain.}
+Removing only the bidirectional update step (Eq.~\eqref{eq:memory_evolution},
+keeping forward link generation) yields slight 1-hop gains ($+1.7$) but
+incurs a multi-hop cost ($-1.8$), with a moderate rise in singleton rate.
+This asymmetry suggests that retroactively revising the contextual framing of
+existing notes is particularly important when a later note must correctly
+reference or build upon an earlier one---a dependency that purely
+forward-pointing links cannot fully capture, though the overall impact
+remains modest compared to disabling Stage~3 entirely.

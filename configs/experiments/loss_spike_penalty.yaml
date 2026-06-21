@@ -1,0 +1,24 @@
+# =============================================================================
+# Temporal Variance Spike Penalty
+# Targets the spike phenomenon shape directly by penalising temporal variance
+# of the blank posterior. Complements per-frame entropy regularisation.
+# Paper Section 3.4: spike phenomenon causes only key frames to contribute.
+# =============================================================================
+data:
+  synthetic: true
+  batch_size: 2
+loss:
+  feature_alignment:
+    enabled: true
+    weight: 0.1
+    mode: "cosine"
+  entropy_regularization:
+    enabled: true
+    weight: 0.01
+  spike_penalty:
+    enabled: true
+    weight: 0.01
+schedule:
+  epochs: 100
+output:
+  experiment_name: "loss_spike_penalty"

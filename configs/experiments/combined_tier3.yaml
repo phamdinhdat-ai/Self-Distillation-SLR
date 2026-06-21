@@ -1,0 +1,66 @@
+# =============================================================================
+# Combined Tier 3 — All Phase 1+2+3 enhancements together
+# Tier 2 + proto contrastive + spike penalty + Conformer + boundary head
+# + layer-wise LR + adaptive stages
+# =============================================================================
+data:
+  synthetic: true
+  batch_size: 2
+  temporal_aug:
+    enabled: true
+    temporal_mask_prob: 0.3
+    temporal_mask_max_ratio: 0.15
+    temporal_jitter_range: 0.2
+
+model:
+  context_type: "conformer"
+  temporal_conv_type: "depthwise_separable"
+  multi_scale_temporal: true
+  multi_scale_dilation_rates: [1, 2]
+  use_boundary_head: true
+
+loss:
+  feature_alignment:
+    enabled: true
+    weight: 0.1
+    mode: "cosine"
+  entropy_regularization:
+    enabled: true
+    weight: 0.01
+  alpha_schedule: "linear"
+  alpha_start: 0.1
+  alpha_end: 0.5
+  focal_ctc:
+    enabled: true
+    gamma: 2.0
+  gsba_confidence_weight: true
+  proto_contrastive:
+    enabled: true
+    weight: 0.01
+    margin: 0.3
+  spike_penalty:
+    enabled: true
+    weight: 0.01
+  boundary:
+    enabled: true
+    weight: 0.1
+
+optimization:
+  use_amp: true
+  grad_accum_steps: 2
+  use_ema: true
+  ema_decay: 0.999
+  layerwise_lr: true
+
+schedule:
+  epochs: 100
+  smooth_transitions: true
+  smooth_transition_epochs: 5
+  adaptive_stages: true
+  adaptive_window: 5
+  adaptive_threshold: 0.5
+  adaptive_min_stage1: 10
+  adaptive_min_stage2: 25
+
+output:
+  experiment_name: "combined_tier3"

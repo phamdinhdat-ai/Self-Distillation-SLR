@@ -97,6 +97,33 @@ STAGE_NAMES = {
 }
 
 
+def _derive_boundary_labels(seg_labels: torch.Tensor) -> torch.Tensor:
+    """
+    Derive per-frame binary boundary labels from GSBA segment labels.
+
+    boundary[t] = 1 if seg_labels[t] != seg_labels[t-1] (new gloss starts)
+    boundary[t] = 0 if same gloss continues
+    boundary[t] = -1 if either frame is ignored (ignore_index)
+
+    Args:
+        seg_labels: (B, T')  – GSBA segment labels, -1 = ignore
+    Returns:
+        boundary_labels: (B, T')  – 0, 1, or -1 (ignore)
+    """
+    B, T = seg_labels.shape
+    boundary = torch.full_like(seg_labels, -1)  # default = ignore
+
+    for b in range(B):
+        for t in range(1, T):
+            curr = seg_labels[b, t].item()
+            prev = seg_labels[b, t - 1].item()
+            if curr == -1 or prev == -1:
+                continue  # ignore boundary if either frame is ignored
+            boundary[b, t] = 1 if curr != prev else 0
+
+    return boundary
+
+
 # ---------------------------------------------------------------------------
 # Trainer
 # ---------------------------------------------------------------------------
@@ -170,6 +197,7 @@ class Trainer:
             pretrained_backbone=cfg.get("pretrained_backbone", False),
             freeze_backbone=cfg.get("freeze_backbone", False),
             context_type=cfg.get("context_type", "bilstm"),
+            use_boundary_head=cfg.get("use_boundary_head", False),
         ).to(self.device)
 
         if self.use_data_parallel:
@@ -195,12 +223,17 @@ class Trainer:
             focal_ctc_enabled=cfg.get("focal_ctc_enabled", False),
             focal_ctc_gamma=cfg.get("focal_ctc_gamma", 2.0),
             gsba_confidence_weight=cfg.get("gsba_confidence_weight", False),
+            proto_contrastive_enabled=cfg.get("proto_contrastive_enabled", False),
+            proto_contrastive_weight=cfg.get("proto_contrastive_weight", 0.01),
+            proto_contrastive_margin=cfg.get("proto_contrastive_margin", 0.3),
+            spike_penalty_enabled=cfg.get("spike_penalty_enabled", False),
+            spike_penalty_weight=cfg.get("spike_penalty_weight", 0.01),
             self_distill_enabled=cfg.get("self_distill_enabled", False),
             kd_temperature=cfg.get("kd_temperature", 4.0),
             kd_weight=cfg.get("kd_weight", 0.5),
         )
 
-        self.optimizer = Adam(self.model.parameters(), lr=cfg.get("lr", 1e-4))
+        self.optimizer = self._build_optimizer(cfg)
         self.scheduler = MultiStepLR(
             self.optimizer, milestones=cfg.get("lr_milestones", [40, 60, 80]),
             gamma=cfg.get("lr_gamma", 0.5),
@@ -242,6 +275,16 @@ class Trainer:
         self.gsba_d = 1
         self.gsba_update_every = cfg.get("gsba_update_every", 10)
 
+        # ---- Adaptive stage transitions ----
+        self.adaptive_stages = cfg.get("adaptive_stages", False)
+        self.adaptive_window = cfg.get("adaptive_window", 5)
+        self.adaptive_threshold = cfg.get("adaptive_threshold", 0.5)  # max WER delta %
+        self.adaptive_min_stage1 = cfg.get("adaptive_min_stage1", 10)
+        self.adaptive_min_stage2 = cfg.get("adaptive_min_stage2", 25)
+        self._wer_history = []  # (epoch, wer) tuples
+        self._last_s1_epoch = None
+        self._last_s2_epoch = None
+
         self.best_wer = float("inf")
         self.best_epoch = None
         self.ckpt_dir = cfg.get("ckpt_dir", "./checkpoints")
@@ -281,6 +324,57 @@ class Trainer:
         self.resume_ckpt_path = cfg.get("resume_ckpt_path", "")
 
         self._print_setup_summary()
+
+    # ------------------------------------------------------------------
+    # Optimizer builder with optional layer-wise LR scaling
+    # ------------------------------------------------------------------
+
+    def _build_optimizer(self, cfg: dict):
+        lr = cfg.get("lr", 1e-4)
+        layerwise = cfg.get("layerwise_lr", False)
+
+        if not layerwise:
+            return Adam(self.model.parameters(), lr=lr)
+
+        # Layer-wise LR: backbone early layers get lower LR to prevent
+        # catastrophic forgetting of ImageNet features on small datasets.
+        raw = self.raw_model
+        vm = raw.visual_module
+
+        param_groups = []
+
+        # Backbone early layers (0.1×)
+        if hasattr(vm.spatial_encoder, 'parameters'):
+            backbone_params = list(vm.spatial_encoder.parameters())
+            param_groups.append({"params": backbone_params, "lr": lr * 0.1, "name": "backbone"})
+
+        # Temporal CNN (1.0×)
+        temporal_params = list(vm.temporal_cnn.parameters())
+        param_groups.append({"params": temporal_params, "lr": lr, "name": "temporal_cnn"})
+
+        # Multi-scale branches (if present)
+        if vm.multi_scale:
+            ms_params = list(vm.ms_branches.parameters()) + list(vm.ms_fusion.parameters())
+            param_groups.append({"params": ms_params, "lr": lr, "name": "multi_scale"})
+
+        # Boundary head (1.5× – fast adaptation for new component)
+        if vm.use_boundary_head and vm.boundary_head is not None:
+            param_groups.append({"params": list(vm.boundary_head.parameters()),
+                                 "lr": lr * 1.5, "name": "boundary_head"})
+
+        # Contextual module (1.0×)
+        param_groups.append({"params": list(raw.contextual_module.parameters()),
+                             "lr": lr, "name": "contextual"})
+
+        # Classifiers (1.0×)
+        param_groups.append({"params": list(raw.shared_classifier.parameters()),
+                             "lr": lr, "name": "shared_classifier"})
+        param_groups.append({"params": list(raw.visual_classifier.parameters()),
+                             "lr": lr, "name": "visual_classifier"})
+        param_groups.append({"params": list(raw.contextual_classifier.parameters()),
+                             "lr": lr, "name": "contextual_classifier"})
+
+        return Adam(param_groups, lr=lr)
 
     # ------------------------------------------------------------------
     # Setup summary
@@ -389,6 +483,16 @@ class Trainer:
             features.append(f"entropy reg (w={self.criterion.entropy_weight})")
         if self.criterion.confidence_weight:
             features.append("confidence-weighted GSBA")
+        if self.criterion.proto_contrastive:
+            features.append(f"proto contrastive (w={self.criterion.proto_weight:.3f}, m={self.criterion.proto_margin:.2f})")
+        if self.criterion.spike_enabled:
+            features.append(f"spike penalty (w={self.criterion.spike_weight:.3f})")
+        if self.cfg.get("use_boundary_head", False):
+            features.append(f"boundary head (w={self.cfg.get('boundary_weight', 0.1)})")
+        if self.cfg.get("layerwise_lr", False):
+            features.append("layer-wise LR")
+        if self.cfg.get("adaptive_stages", False):
+            features.append(f"adaptive stages (min ep: {self.cfg.get('adaptive_min_stage1', 10)}/{self.cfg.get('adaptive_min_stage2', 25)})")
         if self.teacher_model is not None:
             features.append("self-distillation KD")
         if self.cfg.get("temporal_aug_enabled", False):
@@ -398,6 +502,47 @@ class Trainer:
             for feat in features:
                 print(f"      - {feat}")
         print(_hr("="))
+
+    # ------------------------------------------------------------------
+    # Adaptive stage transition check
+    # ------------------------------------------------------------------
+
+    def _should_advance_stage(self, stage: int, epoch: int) -> bool:
+        """Check WER convergence to decide stage transition."""
+        if not self.adaptive_stages or len(self._wer_history) < self.adaptive_window:
+            return False
+
+        # Only advance if minimum epoch floor is met
+        if stage == 1:
+            if epoch < self.adaptive_min_stage1:
+                return False
+            if self._last_s1_epoch is not None and epoch <= self._last_s1_epoch:
+                return False
+        elif stage == 2:
+            if epoch < self.adaptive_min_stage2:
+                return False
+            if self._last_s2_epoch is not None and epoch <= self._last_s2_epoch:
+                return False
+
+        recent = [w for _, w in self._wer_history[-self.adaptive_window:]]
+        if len(recent) < self.adaptive_window:
+            return False
+
+        wer_delta = recent[0] - recent[-1]
+        if wer_delta < self.adaptive_threshold:
+            if stage == 1:
+                self._last_s1_epoch = epoch
+                self.stage1_end = epoch
+            elif stage == 2:
+                self._last_s2_epoch = epoch
+                self.stage2_end = epoch
+            return True
+        return False
+
+    def _record_wer(self, epoch: int, wer: float):
+        """Record WER for adaptive stage transition tracking."""
+        if self.adaptive_stages and wer is not None:
+            self._wer_history.append((epoch, wer))
 
     # ------------------------------------------------------------------
     # Stage helpers
@@ -546,6 +691,14 @@ class Trainer:
         # --- Set effective α for curriculum + smooth transitions ---
         self.criterion.alpha = self._get_alpha(epoch, stage) * self._get_smooth_factor(epoch)
 
+        # --- Set shared classifier weight for prototype contrastive loss ---
+        if self.criterion.proto_contrastive and stage in (1, 2):
+            with torch.no_grad():
+                self.criterion._proto_weight_matrix = F.normalize(
+                    self.raw_model.shared_classifier.weight, p=2, dim=-1)
+        else:
+            self.criterion._proto_weight_matrix = None
+
         # --- Loss computation ---
         loss, loss_dict = self.criterion(
             logits_v=logits_v, logits_g=logits_g, targets=labels,
@@ -554,6 +707,22 @@ class Trainer:
             lvf=lvf, gcf=gcf,
             teacher_logits_g=teacher_logits_g,
         )
+
+        # --- Boundary detector loss (stage 2, if head enabled) ---
+        if (stage == 2 and seg_labels is not None
+                and "boundary_logits" in out
+                and out["boundary_logits"] is not None):
+            boundary_logits = out["boundary_logits"]  # (B, T', 2)
+            # Derive boundary labels from GSBA segment labels:
+            # boundary[t] = 1 if seg_labels[t] != seg_labels[t-1] (a gloss transition)
+            boundary_labels = _derive_boundary_labels(seg_labels)
+            l_boundary = F.cross_entropy(
+                boundary_logits.view(-1, 2),
+                boundary_labels.view(-1),
+                ignore_index=-1,
+            )
+            loss = loss + self.cfg.get("boundary_weight", 0.1) * l_boundary
+            loss_dict["boundary"] = l_boundary.item()
         if self.device.type == "cuda":
             torch.cuda.synchronize()
         t_loss = time.time()
@@ -701,6 +870,9 @@ class Trainer:
                     improved = True
                     self._save_checkpoint(epoch, wer)
 
+                # Adaptive stage transition tracking
+                self._record_wer(epoch, wer)
+
             epoch_time = time.time() - epoch_start
 
             # --- record history ---
@@ -713,7 +885,7 @@ class Trainer:
             self.history["total"].append(avg_losses.get("total"))
             self.history["wer"].append(wer)
             self.history["time"].append(epoch_time)
-            for ek in ("align", "entropy", "kd"):
+            for ek in ("align", "entropy", "kd", "proto", "spike", "boundary"):
                 if ek not in self.history:
                     self.history[ek] = []
                 self.history[ek].append(avg_losses.get(ek))
@@ -730,6 +902,18 @@ class Trainer:
 
             if stage < 3:
                 self.scheduler.step()
+
+            # ---- Adaptive stage transition check ----
+            if self.adaptive_stages and stage < 3 and wer is not None:
+                if self._should_advance_stage(stage, epoch):
+                    next_stage = stage + 1
+                    print(f"\n  [adaptive] Stage {stage} converged (WER delta < {self.adaptive_threshold}% "
+                          f"over {self.adaptive_window} evals) → advancing to stage {next_stage}")
+                    self._set_stage(next_stage)
+                    self._save_stage_checkpoint(stage, epoch)
+                    print(_box_title(f"Stage {next_stage}: {STAGE_NAMES[next_stage]}"))
+                    if next_stage == 3:
+                        self.optimizer = Adam(self.model.parameters(), lr=4e-6)
 
         # Save final stage checkpoint
         final_stage = self._current_stage(self.total_epochs)
@@ -759,7 +943,7 @@ class Trainer:
             loss_parts.append(f"ctc_v {avg_losses['ctc_v']:.4f}")
         if "seg" in avg_losses:
             loss_parts.append(f"seg {avg_losses['seg']:.4f}")
-        for ek in ("align", "entropy", "kd"):
+        for ek in ("align", "entropy", "kd", "proto", "spike", "boundary"):
             if ek in avg_losses and avg_losses[ek] is not None and avg_losses[ek] != 0:
                 loss_parts.append(f"{ek} {avg_losses[ek]:.4f}")
         if "total" in avg_losses:
